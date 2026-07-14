@@ -5,8 +5,6 @@ import { z } from "zod";
 import { handleAccessRequest } from "./access-handler";
 import type { Props } from "./workers-oauth-utils";
 
-const ALLOWED_EMAILS = new Set(["<INSERT EMAIL>"]);
-
 export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
 		name: "Concierge MCP",
@@ -24,37 +22,33 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 			}),
 		);
 
-		// Dynamically add tools based on the user's login. In this case, I want to limit
-		// access to my Image Generation tool to just me
-		if (ALLOWED_EMAILS.has(this.props!.email)) {
-			this.server.tool(
-				"generateImage",
-				"Generate an image using the `flux-1-schnell` model. Works best with 8 steps.",
-				{
-					prompt: z
-						.string()
-						.describe("A text description of the image you want to generate."),
-					steps: z
-						.number()
-						.min(4)
-						.max(8)
-						.default(4)
-						.describe(
-							"The number of diffusion steps; higher values can improve quality but take longer. Must be between 4 and 8, inclusive.",
-						),
-				},
-				async ({ prompt, steps }) => {
-					const response = await this.env.AI.run("@cf/black-forest-labs/flux-1-schnell", {
-						prompt,
-						steps,
-					});
+		this.server.tool(
+			"generateImage",
+			"Generate an image using the `flux-1-schnell` model. Works best with 8 steps.",
+			{
+				prompt: z
+					.string()
+					.describe("A text description of the image you want to generate."),
+				steps: z
+					.number()
+					.min(4)
+					.max(8)
+					.default(4)
+					.describe(
+						"The number of diffusion steps; higher values can improve quality but take longer. Must be between 4 and 8, inclusive.",
+					),
+			},
+			async ({ prompt, steps }) => {
+				const response = await this.env.AI.run("@cf/black-forest-labs/flux-1-schnell", {
+					prompt,
+					steps,
+				});
 
-					return {
-						content: [{ data: response.image!, mimeType: "image/jpeg", type: "image" }],
-					};
-				},
-			);
-		}
+				return {
+					content: [{ data: response.image!, mimeType: "image/jpeg", type: "image" }],
+				};
+			},
+		);
 	}
 }
 

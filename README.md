@@ -55,14 +55,8 @@ You now have a remote MCP server deployed!
 
 ### Access Control
 
-This MCP server uses Access for authentication. All authenticated Access users can access basic tools like "add".
-
-The "generateImage" tool is restricted to specific Access users listed in the `ALLOWED_EMAILS` configuration:
-
-```typescript
-// Add user emails for image generation access
-const ALLOWED_EMAILS = new Set(["employee1@mycompany.com", "teammate1@mycompany.com"]);
-```
+This MCP server uses Access for authentication. Authenticated Access users can access
+the registered tools.
 
 ### Access the remote MCP server from Claude Desktop
 

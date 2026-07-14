@@ -17,7 +17,7 @@ Clone the repo & install dependencies: `npm install`
 
 Create a new [Access for SaaS OIDC App](https://developers.cloudflare.com/cloudflare-one/applications/configure-apps/saas-apps/generic-oidc-saas/):
 
-- For the Authorization callback URL, specify `https://concierge.<your-subdomain>.workers.dev/callback` and `http://localhost:8788/callback` if you are developing locally.
+- For the Authorization callback URL, specify `https://concierge.j1.io/callback` and `http://localhost:8788/callback` if you are developing locally.
 - Note your Client ID and Client secret.
 - Set secrets via Wrangler
 
@@ -38,7 +38,7 @@ wrangler secret put COOKIE_ENCRYPTION_KEY # add any random string here e.g. open
 
 #### Deploy & Test
 
-Deploy the MCP server to make it available on your workers.dev domain
+Deploy the MCP server to make it available on your configured Worker domain
 ` wrangler deploy`
 
 Test the remote server using [Inspector](https://modelcontextprotocol.io/docs/tools/inspector):
@@ -47,7 +47,7 @@ Test the remote server using [Inspector](https://modelcontextprotocol.io/docs/to
 npx @modelcontextprotocol/inspector@latest
 ```
 
-Enter `https://concierge.<your-subdomain>.workers.dev/mcp` and hit connect. Once you go through the authentication flow, you'll see the Tools working:
+Enter `https://concierge.j1.io/mcp` and hit connect. Once you go through the authentication flow, you'll see the Tools working:
 
 <img width="640" alt="image" src="https://github.com/user-attachments/assets/7973f392-0a9d-4712-b679-6dd23f824287" />
 
@@ -77,7 +77,7 @@ Replace the content with the following configuration. Once you restart Claude De
       "command": "npx",
       "args": [
         "mcp-remote",
-        "https://concierge.<your-subdomain>.workers.dev/mcp"
+        "https://concierge.j1.io/mcp"
       ]
     }
   }
@@ -117,7 +117,7 @@ When using Claude to connect to your remote MCP server, you may see some error m
 
 #### Using Cursor and other MCP Clients
 
-To connect Cursor with your MCP server, choose `Type`: "Command" and in the `Command` field, combine the command and args fields into one (e.g. `npx mcp-remote https://<your-worker-name>.<your-subdomain>.workers.dev/mcp`).
+To connect Cursor with your MCP server, choose `Type`: "Command" and in the `Command` field, combine the command and args fields into one (e.g. `npx mcp-remote https://concierge.j1.io/mcp`).
 
 Note that while Cursor supports HTTP+SSE servers, it doesn't support authentication, so you still need to use `mcp-remote` (and to use a STDIO server, not an HTTP one).
 

@@ -5,8 +5,15 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "concierge",
+	"account_id": "40444d2f11999fee857be59abe745754",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-07-12",
+	"routes": [
+		{
+			"pattern": "concierge.j1.io",
+			"custom_domain": true
+		}
+	],
 	"migrations": [
 		{
 			"new_sqlite_classes": [
@@ -29,7 +36,7 @@
 	"kv_namespaces": [
 		{
 			"binding": "OAUTH_KV",
-			"id": "<Add-KV-ID>"
+			"id": "3c6e0360ed0441a1b35d505ee13011e1"
 		}
 	],
 	"ai": {

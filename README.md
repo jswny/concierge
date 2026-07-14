@@ -55,8 +55,8 @@ You now have a remote MCP server deployed!
 
 ### Access Control
 
-This MCP server uses Access for authentication. Authenticated Access users can access
-the registered tools.
+This MCP server uses Access for authentication. Once authenticated, MCP clients can
+access the registered tools.
 
 ### Access the remote MCP server from Claude Desktop
 
@@ -134,7 +134,6 @@ Durable MCP extends the base MCP functionality with Cloudflare's Durable Objects
 - Persistent state management for your MCP server
 - Secure storage of authentication context between requests
 - Access to authenticated user information via `this.props`
-- Support for conditional tool availability based on user identity
 
 #### MCP Remote
 

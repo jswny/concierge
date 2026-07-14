@@ -12,40 +12,51 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 	});
 
 	async init() {
-		// Hello, world!
 		this.server.tool(
-			"add",
-			"Add two numbers the way only MCP can",
-			{ a: z.number(), b: z.number() },
-			async ({ a, b }) => ({
-				content: [{ text: String(a + b), type: "text" }],
-			}),
-		);
-
-		this.server.tool(
-			"generateImage",
-			"Generate an image using the `flux-1-schnell` model. Works best with 8 steps.",
+			"read_webpage_as_markdown",
+			"Read a public HTTP(S) webpage as Markdown. The page is rendered with Cloudflare Browser Run and waits for networkidle0 before extraction.",
 			{
-				prompt: z
-					.string()
-					.describe("A text description of the image you want to generate."),
-				steps: z
-					.number()
-					.min(4)
-					.max(8)
-					.default(4)
-					.describe(
-						"The number of diffusion steps; higher values can improve quality but take longer. Must be between 4 and 8, inclusive.",
-					),
+				url: z.string().url().describe("The HTTP(S) webpage URL to render and convert to Markdown."),
 			},
-			async ({ prompt, steps }) => {
-				const response = await this.env.AI.run("@cf/black-forest-labs/flux-1-schnell", {
-					prompt,
-					steps,
+			async ({ url }) => {
+				const parsedUrl = new URL(url);
+				if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+					return {
+						content: [{ text: "Only HTTP and HTTPS URLs are supported.", type: "text" }],
+						isError: true,
+					};
+				}
+
+				const response = await this.env.BROWSER.quickAction("markdown", {
+					url: parsedUrl.toString(),
+					gotoOptions: {
+						waitUntil: "networkidle0",
+					},
 				});
+				const payload = (await response.json()) as
+					| { result: string; success: true }
+					| { errors?: Array<{ code?: number; detail?: string; message: string }>; success: false };
+
+				if (!response.ok || !payload.success) {
+					const errors =
+						payload.success === false && payload.errors?.length
+							? payload.errors
+									.map((error) =>
+										[error.message, error.detail, error.code && `code ${error.code}`]
+											.filter(Boolean)
+											.join(" "),
+									)
+									.join("\n")
+							: `Browser Run returned HTTP ${response.status}.`;
+
+					return {
+						content: [{ text: errors, type: "text" }],
+						isError: true,
+					};
+				}
 
 				return {
-					content: [{ data: response.image!, mimeType: "image/jpeg", type: "image" }],
+					content: [{ text: payload.result, type: "text" }],
 				};
 			},
 		);

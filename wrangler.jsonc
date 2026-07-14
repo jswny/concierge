@@ -39,8 +39,9 @@
 			"id": "3c6e0360ed0441a1b35d505ee13011e1"
 		}
 	],
-	"ai": {
-		"binding": "AI"
+	"browser": {
+		"binding": "BROWSER",
+		"remote": true
 	},
 	"observability": {
 		"enabled": true

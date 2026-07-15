@@ -65,4 +65,12 @@ If the application uses Durable Objects or Workflows, refer to the relevant best
 - The project-facing name is `concierge`; the vendored C3 block may still mention the original scaffold command and template name for provenance.
 - Later, compare the current `McpAgent` scaffold against Cloudflare's `createMcpHandler` guidance for newer Streamable HTTP MCP servers before making larger transport/auth changes.
 
+## Local Development
+
+- `npm run dev` enables `CONCIERGE_DEBUG=true` and exposes the authless local MCP route at `http://localhost:8788/debug/mcp`; production `/mcp` remains OAuth-protected.
+- Local MCP smoke test:
+  - `npx --yes @modelcontextprotocol/inspector --cli http://localhost:8788/debug/mcp --transport http --method tools/list`
+  - `npx --yes @modelcontextprotocol/inspector --cli http://localhost:8788/debug/mcp --transport http --method tools/call --tool-name read_webpage_as_markdown --tool-arg url=https://example.com`
+- Use `/debug/mcp` only for local tool iteration; use `https://concierge.j1.io/mcp` when validating the real OAuth client flow.
+
 <!-- END PROJECT_CUSTOM_AGENT_GUIDANCE -->

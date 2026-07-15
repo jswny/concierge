@@ -5,6 +5,10 @@ import { z } from "zod";
 import { handleAccessRequest } from "./access-handler";
 import type { Props } from "./workers-oauth-utils";
 
+type DebugEnv = Env & {
+	CONCIERGE_DEBUG?: string;
+};
+
 export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
 		name: "Concierge MCP",
@@ -63,7 +67,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 	}
 }
 
-export default new OAuthProvider({
+const oauthProvider = new OAuthProvider({
 	apiHandler: MyMCP.serve("/mcp"),
 	apiRoute: "/mcp",
 	authorizeEndpoint: "/authorize",
@@ -71,3 +75,20 @@ export default new OAuthProvider({
 	defaultHandler: { fetch: handleAccessRequest as any },
 	tokenEndpoint: "/token",
 });
+
+const debugMcpHandler = MyMCP.serve("/debug/mcp");
+
+export default {
+	fetch(request: Request, env: DebugEnv, ctx: ExecutionContext) {
+		const url = new URL(request.url);
+		if (url.pathname === "/debug/mcp") {
+			if (env.CONCIERGE_DEBUG?.trim().toLowerCase() !== "true") {
+				return new Response("Not found", { status: 404 });
+			}
+
+			return debugMcpHandler.fetch(request, env, ctx);
+		}
+
+		return oauthProvider.fetch(request, env, ctx);
+	},
+} satisfies ExportedHandler<DebugEnv>;

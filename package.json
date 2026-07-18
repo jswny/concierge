@@ -10,6 +10,7 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
+    "@cloudflare/codemode": "^0.4.2",
     "@cloudflare/workers-oauth-provider": "^0.8.1",
     "agents": "^0.17.1",
     "just-pick": "^4.2.0",

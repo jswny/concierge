@@ -1,3 +1,5 @@
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { codeMcpServer } from "@cloudflare/codemode/mcp";
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpHandler } from "agents/mcp";
@@ -73,19 +75,25 @@ async function readWebpageAsMarkdown(env: Env, url: string): Promise<TextToolRes
 	};
 }
 
-function handleMcpRequest(request: Request, env: DebugEnv, ctx: ExecutionContext, route: string) {
-	const server = createConciergeServer(env);
+async function createConciergeCodeServer(env: Env) {
+	const upstream = createConciergeServer(env);
+	const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+	return codeMcpServer({ server: upstream, executor });
+}
+
+async function handleMcpRequest(request: Request, env: DebugEnv, ctx: ExecutionContext, route: string) {
+	const server = await createConciergeCodeServer(env);
 	return createMcpHandler(server, { route })(request, env, ctx);
 }
 
 const oauthMcpHandler = {
-	fetch(request: Request, env: DebugEnv, ctx: ExecutionContext) {
+	async fetch(request: Request, env: DebugEnv, ctx: ExecutionContext) {
 		return handleMcpRequest(request, env, ctx, "/mcp");
 	},
 };
 
 const debugMcpHandler = {
-	fetch(request: Request, env: DebugEnv, ctx: ExecutionContext) {
+	async fetch(request: Request, env: DebugEnv, ctx: ExecutionContext) {
 		return handleMcpRequest(request, env, ctx, "/debug/mcp");
 	},
 };

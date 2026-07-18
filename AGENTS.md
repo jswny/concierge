@@ -63,14 +63,14 @@ If the application uses Durable Objects or Workflows, refer to the relevant best
 - Preserve the vendored C3 block above unless intentionally refreshing it from a newly generated Create Cloudflare scaffold.
 - Put repo-specific conventions, commands, and deployment notes in this custom section so they survive vendored guidance updates.
 - The project-facing name is `concierge`; the vendored C3 block may still mention the original scaffold command and template name for provenance.
-- The MCP server uses Cloudflare's `createMcpHandler` with a fresh `McpServer` per request; keep it stateless unless a tool genuinely needs Durable Object-backed session state.
+- The MCP server exposes Cloudflare Code Mode by wrapping a fresh upstream `McpServer` with `codeMcpServer()` per request, then serving it through `createMcpHandler`; keep upstream tools stateless unless a tool genuinely needs Durable Object-backed session state.
 
 ## Local Development
 
 - `npm run dev` enables `CONCIERGE_DEBUG=true` and exposes the authless local MCP route at `http://localhost:8788/debug/mcp`; production `/mcp` remains OAuth-protected.
 - Local MCP smoke test:
   - `npx --yes @modelcontextprotocol/inspector --cli http://localhost:8788/debug/mcp --transport http --method tools/list`
-  - `npx --yes @modelcontextprotocol/inspector --cli http://localhost:8788/debug/mcp --transport http --method tools/call --tool-name read_webpage_as_markdown --tool-arg url=https://example.com`
+  - `npx --yes @modelcontextprotocol/inspector --cli http://localhost:8788/debug/mcp --transport http --method tools/call --tool-name code --tool-arg code="async () => await codemode.read_webpage_as_markdown({ url: 'https://example.com' })"`
 - Use `/debug/mcp` only for local tool iteration; use `https://concierge.j1.io/mcp` when validating the real OAuth client flow.
 
 <!-- END PROJECT_CUSTOM_AGENT_GUIDANCE -->

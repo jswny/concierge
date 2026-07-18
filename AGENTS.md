@@ -63,7 +63,7 @@ If the application uses Durable Objects or Workflows, refer to the relevant best
 - Preserve the vendored C3 block above unless intentionally refreshing it from a newly generated Create Cloudflare scaffold.
 - Put repo-specific conventions, commands, and deployment notes in this custom section so they survive vendored guidance updates.
 - The project-facing name is `concierge`; the vendored C3 block may still mention the original scaffold command and template name for provenance.
-- Later, compare the current `McpAgent` scaffold against Cloudflare's `createMcpHandler` guidance for newer Streamable HTTP MCP servers before making larger transport/auth changes.
+- The MCP server uses Cloudflare's `createMcpHandler` with a fresh `McpServer` per request; keep it stateless unless a tool genuinely needs Durable Object-backed session state.
 
 ## Local Development
 

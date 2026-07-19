@@ -65,6 +65,8 @@ If the application uses Durable Objects or Workflows, refer to the relevant best
 - The project-facing name is `concierge`; the vendored C3 block may still mention the original scaffold command and template name for provenance.
 - The MCP server exposes a single `code` tool backed by Cloudflare Code Mode `createCodemodeRuntime()` and repo-owned connectors. `ConciergeMcpRuntime` hosts the Code Mode runtime/facet state; keep connector tools stateless unless they genuinely need Durable Object-backed session state.
 - Keep the model-facing `code` tool description derived from the upstream Code Mode default, then sanitize unsupported project features locally; do not copy the whole upstream description unless intentionally pinning it.
+- The MCP-facing `code` output schema wraps the Code Mode return value as `structuredContent.result`; keep the text `content` fallback aligned with the same value.
+- Keep MCP tool annotations aligned with the active connector set. The current `code` annotations assume read-only connector tools that may read from arbitrary public URLs.
 - Do not mark connector tools with `requiresApproval`; this MCP server does not expose Code Mode approval/resume controls, so approval-required runs are treated as errors.
 - Do not rely on Code Mode rollback/revert for MCP-visible behavior; this server does not expose rollback controls, and arbitrary side-effect tools should be designed as explicit safe operations instead.
 - Do not advertise `codemode.step` in the model-facing tool description while replay/resume-oriented workflows remain unsupported.

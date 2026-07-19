@@ -21,6 +21,7 @@ type DebugEnv = Env & {
 type TextToolResult = {
 	content: Array<{ text: string; type: "text" }>;
 	isError?: boolean;
+	structuredContent?: Record<string, unknown>;
 };
 
 function createConciergeServer(ctx: DurableObjectState, env: DebugEnv) {
@@ -47,6 +48,17 @@ function createConciergeServer(ctx: DurableObjectState, env: DebugEnv) {
 			inputSchema: {
 				code: z.string().describe("JavaScript async arrow function to execute."),
 			},
+			outputSchema: {
+				result: z
+					.unknown()
+					.describe("The single JSON-serializable value returned by the async function."),
+			},
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: true,
+			},
 		},
 		async ({ code }, options) => formatCodeToolOutput(await codeTool.execute({ code }, options)),
 	);
@@ -68,7 +80,7 @@ function createConciergeCodeToolDescription(defaultDescription: string) {
 		lines.join("\n").trim(),
 		"Output Format",
 		[
-			"The MCP tool result is the single value returned by the async function. Return any value the model should receive for later reasoning; console logs and intermediate values are not returned.",
+			"The Code Mode result is the single value returned by the async function. Return any value the model should receive for later reasoning; console logs and intermediate values are not returned.",
 			"If multiple values are needed, return one object that contains them, e.g. `return { first, second };`.",
 		].join("\n"),
 	);
@@ -95,8 +107,10 @@ function appendMarkdownSection(markdown: string, heading: string, body: string) 
 
 function formatCodeToolOutput(output: ProxyToolOutput): TextToolResult {
 	if (output.status === "completed") {
+		const result = normalizeStructuredResult(output.result);
 		return {
 			content: [{ text: stringifyToolResult(output.result), type: "text" }],
+			structuredContent: { result },
 		};
 	}
 
@@ -131,6 +145,10 @@ function stringifyToolResult(result: unknown) {
 	} catch {
 		return String(result);
 	}
+}
+
+function normalizeStructuredResult(result: unknown) {
+	return result === undefined ? null : result;
 }
 
 function handleMcpRequest(request: Request, env: DebugEnv) {

@@ -32,6 +32,22 @@
 			"binding": "LOADER"
 		}
 	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "CONCIERGE_MCP",
+				"class_name": "ConciergeMcpRuntime"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"ConciergeMcpRuntime"
+			]
+		}
+	],
 	"observability": {
 		"enabled": true
 	},

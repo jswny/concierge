@@ -1,10 +1,18 @@
-import { DynamicWorkerExecutor } from "@cloudflare/codemode";
-import { codeMcpServer } from "@cloudflare/codemode/mcp";
+import {
+	createCodemodeRuntime,
+	DynamicWorkerExecutor,
+	truncateResult,
+	type ProxyToolOutput,
+} from "@cloudflare/codemode";
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
+import { DurableObject } from "cloudflare:workers";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpHandler } from "agents/mcp";
 import { z } from "zod";
 import { handleAccessRequest } from "./access-handler";
+import { CloudflareConnector } from "./cloudflare-connector";
+
+export { CodemodeRuntime } from "@cloudflare/codemode";
 
 type DebugEnv = Env & {
 	CONCIERGE_DEBUG?: string;
@@ -15,86 +23,141 @@ type TextToolResult = {
 	isError?: boolean;
 };
 
-function createConciergeServer(env: Env) {
+function createConciergeServer(ctx: DurableObjectState, env: DebugEnv) {
 	const server = new McpServer({
 		name: "Concierge MCP",
 		version: "1.0.0",
 	});
-
-	server.tool(
-		"read_webpage_as_markdown",
-		"Read a public HTTP(S) webpage as Markdown. The page is rendered with Cloudflare Browser Run and waits for networkidle0 before extraction.",
-		{
-			url: z.string().url().describe("The HTTP(S) webpage URL to render and convert to Markdown."),
+	const runtime = createCodemodeRuntime({
+		connectors: [new CloudflareConnector(ctx, env)],
+		ctx,
+		executor: new DynamicWorkerExecutor({ loader: env.LOADER }),
+		transformResult: (result) => truncateResult(result),
+	});
+	const codeTool = runtime.tool({
+		connectorHints: {
+			cloudflare: "Read rendered public webpages as Markdown with Cloudflare Browser Run.",
 		},
-		async ({ url }) => readWebpageAsMarkdown(env, url),
+	});
+
+	server.registerTool(
+		"code",
+		{
+			description: createConciergeCodeToolDescription(codeTool.description),
+			inputSchema: {
+				code: z.string().describe("JavaScript async arrow function to execute."),
+			},
+		},
+		async ({ code }, options) => formatCodeToolOutput(await codeTool.execute({ code }, options)),
 	);
 
 	return server;
 }
 
-async function readWebpageAsMarkdown(env: Env, url: string): Promise<TextToolResult> {
-	const parsedUrl = new URL(url);
-	if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+function createConciergeCodeToolDescription(defaultDescription: string) {
+	const withoutSnippets = removeMarkdownSection(defaultDescription, "Snippets");
+	const lines = withoutSnippets
+		.split("\n")
+		.filter((line) => !line.startsWith("- Some methods require approval."))
+		.filter((line) => !line.startsWith('- A result with `status: "paused"`'))
+		.filter((line) => !line.startsWith("- `codemode.step("))
+		.filter((line) => !line.startsWith("- All code outside connector calls"))
+		.map((line) => line.replaceAll(" and saved snippets", ""));
+
+	return appendMarkdownSection(
+		lines.join("\n").trim(),
+		"Output Format",
+		[
+			"The MCP tool result is the single value returned by the async function. Return any value the model should receive for later reasoning; console logs and intermediate values are not returned.",
+			"If multiple values are needed, return one object that contains them, e.g. `return { first, second };`.",
+		].join("\n"),
+	);
+}
+
+function removeMarkdownSection(markdown: string, heading: string) {
+	const marker = `\n## ${heading}\n`;
+	const start = markdown.indexOf(marker);
+	if (start === -1) {
+		return markdown;
+	}
+
+	const next = markdown.indexOf("\n## ", start + marker.length);
+	if (next === -1) {
+		return markdown.slice(0, start).trimEnd();
+	}
+
+	return `${markdown.slice(0, start)}${markdown.slice(next)}`;
+}
+
+function appendMarkdownSection(markdown: string, heading: string, body: string) {
+	return `${markdown}\n\n## ${heading}\n\n${body}`;
+}
+
+function formatCodeToolOutput(output: ProxyToolOutput): TextToolResult {
+	if (output.status === "completed") {
 		return {
-			content: [{ text: "Only HTTP and HTTPS URLs are supported.", type: "text" }],
-			isError: true,
+			content: [{ text: stringifyToolResult(output.result), type: "text" }],
 		};
 	}
 
-	const response = await env.BROWSER.quickAction("markdown", {
-		url: parsedUrl.toString(),
-		gotoOptions: {
-			waitUntil: "networkidle0",
-		},
-	});
-	const payload = (await response.json()) as
-		| { result: string; success: true }
-		| { errors?: Array<{ code?: number; detail?: string; message: string }>; success: false };
-
-	if (!response.ok || !payload.success) {
-		const errors =
-			payload.success === false && payload.errors?.length
-				? payload.errors
-						.map((error) =>
-							[error.message, error.detail, error.code && `code ${error.code}`]
-								.filter(Boolean)
-								.join(" "),
-						)
-						.join("\n")
-				: `Browser Run returned HTTP ${response.status}.`;
-
+	if (output.status === "paused") {
 		return {
-			content: [{ text: errors, type: "text" }],
+			content: [
+				{
+					text: "Approval-required Code Mode tools are not supported by this MCP server.",
+					type: "text",
+				},
+			],
 			isError: true,
 		};
 	}
 
 	return {
-		content: [{ text: payload.result, type: "text" }],
+		content: [{ text: output.error, type: "text" }],
+		isError: true,
 	};
 }
 
-async function createConciergeCodeServer(env: Env) {
-	const upstream = createConciergeServer(env);
-	const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-	return codeMcpServer({ server: upstream, executor });
+function stringifyToolResult(result: unknown) {
+	if (typeof result === "string") {
+		return result;
+	}
+	if (result === undefined) {
+		return "";
+	}
+
+	try {
+		return JSON.stringify(result, null, 2);
+	} catch {
+		return String(result);
+	}
 }
 
-async function handleMcpRequest(request: Request, env: DebugEnv, ctx: ExecutionContext, route: string) {
-	const server = await createConciergeCodeServer(env);
-	return createMcpHandler(server, { route })(request, env, ctx);
+function handleMcpRequest(request: Request, env: DebugEnv) {
+	return env.CONCIERGE_MCP.getByName("default").fetch(request);
+}
+
+export class ConciergeMcpRuntime extends DurableObject<DebugEnv> {
+	fetch(request: Request) {
+		const route = new URL(request.url).pathname === "/debug/mcp" ? "/debug/mcp" : "/mcp";
+		const server = createConciergeServer(this.ctx, this.env);
+		return createMcpHandler(server, { route })(
+			request,
+			this.env,
+			this.ctx as unknown as ExecutionContext,
+		);
+	}
 }
 
 const oauthMcpHandler = {
-	async fetch(request: Request, env: DebugEnv, ctx: ExecutionContext) {
-		return handleMcpRequest(request, env, ctx, "/mcp");
+	async fetch(request: Request, env: DebugEnv, _ctx?: ExecutionContext) {
+		return handleMcpRequest(request, env);
 	},
 };
 
 const debugMcpHandler = {
-	async fetch(request: Request, env: DebugEnv, ctx: ExecutionContext) {
-		return handleMcpRequest(request, env, ctx, "/debug/mcp");
+	async fetch(request: Request, env: DebugEnv, _ctx?: ExecutionContext) {
+		return handleMcpRequest(request, env);
 	},
 };
 

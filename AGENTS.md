@@ -66,7 +66,9 @@ If the application uses Durable Objects or Workflows, refer to the relevant best
 - The MCP server exposes a single `code` tool backed by Cloudflare Code Mode `createCodemodeRuntime()` and repo-owned connectors. `ConciergeMcpRuntime` hosts the Code Mode runtime/facet state; keep connector tools stateless unless they genuinely need Durable Object-backed session state.
 - Keep the model-facing `code` tool description derived from the upstream Code Mode default, then sanitize unsupported project features locally; do not copy the whole upstream description unless intentionally pinning it.
 - The MCP-facing `code` output schema wraps the Code Mode return value as `structuredContent.result`; keep the text `content` fallback aligned with the same value.
-- Keep MCP tool annotations aligned with the active connector set. The current `code` annotations assume read-only connector tools that may read from arbitrary public URLs.
+- Keep MCP tool annotations aligned with the active connector set. The current `code` annotations intentionally mark it as write-capable and destructive because `notion.request` exposes broad Notion REST API writes and deletes.
+- The Notion connector intentionally exposes one compact `notion.request({ method, path, query?, body? })` method instead of embedding or generating the full API schema. Models should consult the current official Notion API documentation for endpoint details before calling it.
+- Notion API calls use the `NOTION_TOKEN` Worker secret and pin the `Notion-Version` header in `src/notion-connector.ts`; verify current Notion API versioning docs before changing that constant.
 - Do not mark connector tools with `requiresApproval`; this MCP server does not expose Code Mode approval/resume controls, so approval-required runs are treated as errors.
 - Do not rely on Code Mode rollback/revert for MCP-visible behavior; this server does not expose rollback controls, and arbitrary side-effect tools should be designed as explicit safe operations instead.
 - Do not advertise `codemode.step` in the model-facing tool description while replay/resume-oriented workflows remain unsupported.
@@ -77,6 +79,7 @@ If the application uses Durable Objects or Workflows, refer to the relevant best
 - Local MCP smoke test:
   - `npx --yes @modelcontextprotocol/inspector --cli http://localhost:8788/debug/mcp --transport http --method tools/list`
   - `npx --yes @modelcontextprotocol/inspector --cli http://localhost:8788/debug/mcp --transport http --method tools/call --tool-name code --tool-arg code="async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com' })"`
+- With `NOTION_TOKEN` configured locally, smoke test Notion with `npx --yes @modelcontextprotocol/inspector --cli http://localhost:8788/debug/mcp --transport http --method tools/call --tool-name code --tool-arg code="async () => await notion.request({ method: 'GET', path: '/v1/users/me' })"`.
 - Use `/debug/mcp` only for local tool iteration; use `https://concierge.j1.io/mcp` when validating the real OAuth client flow.
 
 <!-- END PROJECT_CUSTOM_AGENT_GUIDANCE -->

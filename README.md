@@ -6,4 +6,4 @@ Endpoint: `https://concierge.j1.io/mcp`
 
 ## Tool
 
-- `code`: runs JavaScript in Cloudflare Code Mode against Concierge connectors. Current connector capability: `cloudflare.read_webpage_as_markdown({ url })`, which renders a public HTTP(S) URL with Cloudflare Browser Run, waits for `networkidle0`, and returns Markdown.
+- `code`: runs JavaScript in Cloudflare Code Mode against Concierge connectors. Current connector capabilities: rendered public webpage Markdown via Cloudflare Browser Run, and direct Notion REST API requests authenticated with a server-side token.

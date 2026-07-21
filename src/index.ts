@@ -11,6 +11,7 @@ import { createMcpHandler } from "agents/mcp";
 import { z } from "zod";
 import { handleAccessRequest } from "./access-handler";
 import { CloudflareConnector } from "./cloudflare-connector";
+import { NotionConnector } from "./notion-connector";
 
 export { CodemodeRuntime } from "@cloudflare/codemode";
 
@@ -30,7 +31,7 @@ function createConciergeServer(ctx: DurableObjectState, env: DebugEnv) {
 		version: "1.0.0",
 	});
 	const runtime = createCodemodeRuntime({
-		connectors: [new CloudflareConnector(ctx, env)],
+		connectors: [new CloudflareConnector(ctx, env), new NotionConnector(ctx, env)],
 		ctx,
 		executor: new DynamicWorkerExecutor({ loader: env.LOADER }),
 		transformResult: (result) => truncateResult(result),
@@ -38,6 +39,8 @@ function createConciergeServer(ctx: DurableObjectState, env: DebugEnv) {
 	const codeTool = runtime.tool({
 		connectorHints: {
 			cloudflare: "Read rendered public webpages as Markdown with Cloudflare Browser Run.",
+			notion:
+				"Call the Notion REST API through notion.request with the server-side NOTION_TOKEN. Consult the current official Notion API documentation for request details.",
 		},
 	});
 
@@ -54,9 +57,9 @@ function createConciergeServer(ctx: DurableObjectState, env: DebugEnv) {
 					.describe("The single JSON-serializable value returned by the async function."),
 			},
 			annotations: {
-				readOnlyHint: true,
-				destructiveHint: false,
-				idempotentHint: true,
+				readOnlyHint: false,
+				destructiveHint: true,
+				idempotentHint: false,
 				openWorldHint: true,
 			},
 		},

@@ -12,6 +12,8 @@ import { z } from "zod";
 import { handleAccessRequest } from "./access-handler";
 import { CloudflareConnector } from "./cloudflare-connector";
 import { NotionConnector } from "./notion-connector";
+import { XConnector } from "./integrations/x/connector";
+import { XOAuthManager, X_OAUTH_CALLBACK_PATH } from "./integrations/x/oauth";
 
 export { CodemodeRuntime } from "@cloudflare/codemode";
 
@@ -25,13 +27,21 @@ type TextToolResult = {
 	structuredContent?: Record<string, unknown>;
 };
 
-function createConciergeServer(ctx: DurableObjectState, env: DebugEnv) {
+function createConciergeServer(
+	ctx: DurableObjectState,
+	env: DebugEnv,
+	xOAuth: XOAuthManager,
+) {
 	const server = new McpServer({
 		name: "Concierge MCP",
 		version: "1.0.0",
 	});
 	const runtime = createCodemodeRuntime({
-		connectors: [new CloudflareConnector(ctx, env), new NotionConnector(ctx, env)],
+		connectors: [
+			new CloudflareConnector(ctx, env),
+			new NotionConnector(ctx, env),
+			new XConnector(ctx, env, xOAuth),
+		],
 		ctx,
 		executor: new DynamicWorkerExecutor({ loader: env.LOADER }),
 		transformResult: (result) => truncateResult(result),
@@ -41,6 +51,7 @@ function createConciergeServer(ctx: DurableObjectState, env: DebugEnv) {
 			cloudflare: "Read rendered public webpages as Markdown with Cloudflare Browser Run.",
 			notion:
 				"Call the Notion REST API through notion.request with the server-side NOTION_TOKEN. Consult the current official Notion API documentation for request details.",
+			x: "Call the X API v2 through x.request with an explicit app-only or user-context OAuth 2.0 credential. Consult the current official X API documentation for request details. Use x.authorizationStatus() to inspect the connection and x.beginAuthorization() to generate the one-time consent URL when needed.",
 		},
 	});
 
@@ -159,9 +170,21 @@ function handleMcpRequest(request: Request, env: DebugEnv) {
 }
 
 export class ConciergeMcpRuntime extends DurableObject<DebugEnv> {
+	private readonly xOAuth: XOAuthManager;
+
+	constructor(ctx: DurableObjectState, env: DebugEnv) {
+		super(ctx, env);
+		this.xOAuth = new XOAuthManager(ctx, env);
+	}
+
 	fetch(request: Request) {
-		const route = new URL(request.url).pathname === "/debug/mcp" ? "/debug/mcp" : "/mcp";
-		const server = createConciergeServer(this.ctx, this.env);
+		const pathname = new URL(request.url).pathname;
+		if (pathname === X_OAUTH_CALLBACK_PATH) {
+			return this.xOAuth.handleCallback(request);
+		}
+
+		const route = pathname === "/debug/mcp" ? "/debug/mcp" : "/mcp";
+		const server = createConciergeServer(this.ctx, this.env, this.xOAuth);
 		return createMcpHandler(server, { route })(
 			request,
 			this.env,
@@ -194,6 +217,10 @@ const oauthProvider = new OAuthProvider<DebugEnv>({
 export default {
 	fetch(request: Request, env: DebugEnv, ctx: ExecutionContext) {
 		const url = new URL(request.url);
+		if (url.pathname === X_OAUTH_CALLBACK_PATH) {
+			return handleMcpRequest(request, env);
+		}
+
 		if (url.pathname === "/debug/mcp") {
 			if (env.CONCIERGE_DEBUG?.trim().toLowerCase() !== "true") {
 				return new Response("Not found", { status: 404 });

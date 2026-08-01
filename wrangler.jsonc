@@ -62,10 +62,7 @@
 			"ACCESS_AUTHORIZATION_URL",
 			"ACCESS_JWKS_URL",
 			"COOKIE_ENCRYPTION_KEY",
-			"NOTION_TOKEN",
-			"X_BEARER_TOKEN",
-			"X_CLIENT_ID",
-			"X_CLIENT_SECRET"
+			"NOTION_TOKEN"
 		]
 	},
 	"upload_source_maps": true

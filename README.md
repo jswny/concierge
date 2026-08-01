@@ -6,4 +6,4 @@ Endpoint: `https://concierge.j1.io/mcp`
 
 ## Tool
 
-- `code`: runs JavaScript in Cloudflare Code Mode against Concierge connectors for rendered webpage Markdown, direct Notion REST API access, and OAuth-authenticated X API v2 operations.
+- `code`: runs JavaScript in Cloudflare Code Mode against Concierge connectors for rendered webpage Markdown and direct Notion REST API access.

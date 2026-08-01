@@ -1,5 +1,11 @@
 export const X_OAUTH_CALLBACK_PATH = "/integrations/x/callback";
 
+export type XEnv = Env & {
+	X_BEARER_TOKEN: string;
+	X_CLIENT_ID: string;
+	X_CLIENT_SECRET: string;
+};
+
 const X_AUTHORIZATION_URL = "https://x.com/i/oauth2/authorize";
 const X_TOKEN_URL = "https://api.x.com/2/oauth2/token";
 const X_TOKEN_STORAGE_KEY = "x:oauth:tokens";
@@ -60,7 +66,7 @@ export class XOAuthManager {
 
 	constructor(
 		private readonly state: DurableObjectState,
-		private readonly env: Env,
+		private readonly env: XEnv,
 	) {}
 
 	async beginAuthorization() {

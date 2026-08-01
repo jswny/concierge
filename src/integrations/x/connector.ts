@@ -1,5 +1,5 @@
 import { CodemodeConnector, type ConnectorTools } from "@cloudflare/codemode";
-import { XOAuthManager } from "./oauth";
+import { XOAuthManager, type XEnv } from "./oauth";
 
 const X_API_ORIGIN = "https://api.x.com";
 const X_AUTH_TYPES = ["app", "user"] as const;
@@ -17,10 +17,10 @@ type XRequestArgs = {
 	query?: Record<string, XQueryValue>;
 };
 
-export class XConnector extends CodemodeConnector<Env> {
+export class XConnector extends CodemodeConnector<XEnv> {
 	constructor(
 		ctx: DurableObjectState,
-		env: Env,
+		env: XEnv,
 		private readonly oauth: XOAuthManager,
 	) {
 		super(ctx, env);
@@ -178,7 +178,7 @@ function readRequestArgs(args: unknown): XRequestArgs {
 	};
 }
 
-async function requestX(env: Env, oauth: XOAuthManager, options: XRequestArgs) {
+async function requestX(env: XEnv, oauth: XOAuthManager, options: XRequestArgs) {
 	const accessToken = await getAccessToken(env, oauth, options.auth);
 	const url = createXUrl(options.path, options.query);
 	const response = await fetch(url, {
@@ -203,7 +203,7 @@ async function requestX(env: Env, oauth: XOAuthManager, options: XRequestArgs) {
 	return payload;
 }
 
-async function getAccessToken(env: Env, oauth: XOAuthManager, auth: XAuthType) {
+async function getAccessToken(env: XEnv, oauth: XOAuthManager, auth: XAuthType) {
 	if (auth === "app") {
 		if (!env.X_BEARER_TOKEN) {
 			throw new Error("X_BEARER_TOKEN is not configured.");

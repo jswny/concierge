@@ -88,10 +88,24 @@ function createConciergeCodeToolDescription(defaultDescription: string) {
 		.filter((line) => !line.startsWith('- A result with `status: "paused"`'))
 		.filter((line) => !line.startsWith("- `codemode.step("))
 		.filter((line) => !line.startsWith("- All code outside connector calls"))
-		.map((line) => line.replaceAll(" and saved snippets", ""));
+		.map((line) =>
+			line
+				.replaceAll(" and saved snippets", "")
+				.replace('codemode.search("short intent phrase")', 'codemode.search("short method capability")'),
+		);
+	const withToolDiscovery = appendMarkdownSection(
+		lines.join("\n").trim(),
+		"Tool Discovery",
+		[
+			"`codemode.search` searches connector method names and descriptions; it does not search the web or external content.",
+			"Search with only a short method capability, such as `read webpage markdown`. Do not include the target site, URL, resource name, or desired content in the query.",
+			"Example: to read reviews from a Google Maps page, search for `read webpage markdown`, describe the matched method, then pass the Google Maps URL to that method. Do not search for `Google Maps reviews`.",
+			"If discovery returns no results, retry with a shorter, more general capability phrase before concluding that no connector method exists.",
+		].join("\n"),
+	);
 
 	return appendMarkdownSection(
-		lines.join("\n").trim(),
+		withToolDiscovery,
 		"Output Format",
 		[
 			"The Code Mode result is the single value returned by the async function. Return any value the model should receive for later reasoning; console logs and intermediate values are not returned.",

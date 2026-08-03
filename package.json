@@ -3,9 +3,11 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
+    "build": "npm run type-check && npm test",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev --var CONCIERGE_DEBUG:true",
     "start": "wrangler dev --var CONCIERGE_DEBUG:true",
+    "test": "node --test tests/worker.test.mjs",
     "cf-typegen": "wrangler types",
     "type-check": "tsc --noEmit"
   },

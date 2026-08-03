@@ -107,7 +107,7 @@ async function requestNotion(env: Env, options: NotionRequestArgs) {
 			options.body === undefined || options.method === "GET"
 				? undefined
 				: JSON.stringify(options.body),
-		redirect: "error",
+		redirect: "manual",
 	});
 	const payload = await readResponsePayload(response);
 

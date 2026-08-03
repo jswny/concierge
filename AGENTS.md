@@ -86,10 +86,9 @@ If the application uses Durable Objects or Workflows, refer to the relevant best
 ## Local Development
 
 - `npm run dev` enables `CONCIERGE_DEBUG=true` and exposes the authless local MCP route at `http://localhost:8788/debug/mcp`; production `/mcp` remains OAuth-protected.
-- Local MCP smoke test:
-  - `npx --yes @modelcontextprotocol/inspector --cli http://localhost:8788/debug/mcp --transport http --method tools/list`
-  - `npx --yes @modelcontextprotocol/inspector --cli http://localhost:8788/debug/mcp --transport http --method tools/call --tool-name code --tool-arg code="async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com' })"`
-- With `NOTION_TOKEN` configured locally, smoke test Notion with `npx --yes @modelcontextprotocol/inspector --cli http://localhost:8788/debug/mcp --transport http --method tools/call --tool-name code --tool-arg code="async () => await notion.request({ method: 'GET', path: '/v1/users/me' })"`.
+- `npm test` runs the production Worker bundle through Wrangler's integration test harness. It covers the OAuth boundary, debug-route gating, Host/Origin validation, modern and legacy MCP flows, Code Mode output, and both active connectors.
+- `npm run build` runs the type check and integration suite together; keep it aligned with the Workers Builds build command so failed checks block deployment.
+- The integration suite uses test-only secrets, replaces Browser Run with a local test Worker, and mocks Notion's outbound request; it does not require local credentials or make live connector calls.
 - After re-enabling X, inspect user authorization with `code="async () => await x.authorizationStatus()"`; with X OAuth client secrets configured locally, generate the one-time setup URL with `code="async () => await x.beginAuthorization()"`. With `X_BEARER_TOKEN` configured locally, smoke test the API method with `code="async () => await x.request({ auth: 'app', method: 'GET', path: '/2/tweets/20' })"`.
 - Use `/debug/mcp` only for local tool iteration; use `https://concierge.j1.io/mcp` when validating the real OAuth client flow.
 

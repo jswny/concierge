@@ -38,18 +38,18 @@ function createConciergeServer(ctx: DurableObjectState, env: DebugEnv) {
 		executor: new DynamicWorkerExecutor({ loader: env.LOADER }),
 		transformResult: (result) => truncateResult(result),
 	});
-	const codeTool = runtime.tool({
+	const codeToolDescription = runtime.tool({
 		connectorHints: {
 			cloudflare: "Read rendered public webpages as Markdown with Cloudflare Browser Run.",
 			notion:
 				"Call the Notion REST API through notion.request with the server-side NOTION_TOKEN. Consult the current official Notion API documentation for request details.",
 		},
-	});
+	}).description;
 
 	server.registerTool(
 		"code",
 		{
-			description: createConciergeCodeToolDescription(codeTool.description),
+			description: createConciergeCodeToolDescription(codeToolDescription),
 			inputSchema: {
 				code: z.string().describe("JavaScript async arrow function to execute."),
 			},
@@ -65,7 +65,7 @@ function createConciergeServer(ctx: DurableObjectState, env: DebugEnv) {
 				openWorldHint: true,
 			},
 		},
-		async ({ code }, options) => formatCodeToolOutput(await codeTool.execute({ code }, options)),
+		async ({ code }) => formatCodeToolOutput(await runtime.execute({ code })),
 	);
 
 	return server;

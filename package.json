@@ -16,8 +16,6 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "@modelcontextprotocol/server": "2.0.0",
     "agents": "0.20.1",
-    "just-pick": "^4.2.0",
-    "octokit": "^5.0.5",
     "zod": "^4.4.3"
   },
   "devDependencies": {

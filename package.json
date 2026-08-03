@@ -10,9 +10,12 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@cloudflare/codemode": "^0.4.2",
-    "@cloudflare/workers-oauth-provider": "^0.8.1",
-    "agents": "^0.17.1",
+    "@cloudflare/codemode": "0.5.1",
+    "@cloudflare/workers-oauth-provider": "0.8.3",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "agents": "0.20.1",
     "just-pick": "^4.2.0",
     "octokit": "^5.0.5",
     "zod": "^4.4.3"
@@ -20,6 +23,6 @@
   "devDependencies": {
     "@types/node": "^26.1.1",
     "typescript": "6.0.3",
-    "wrangler": "^4.110.0"
+    "wrangler": "4.118.0"
   }
 }

@@ -6,8 +6,8 @@ import {
 } from "@cloudflare/codemode";
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { DurableObject } from "cloudflare:workers";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createMcpHandler } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/server";
+import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { handleAccessRequest } from "./access-handler";
 import { CloudflareConnector } from "./cloudflare-connector";
@@ -24,6 +24,8 @@ type TextToolResult = {
 	isError?: boolean;
 	structuredContent?: Record<string, unknown>;
 };
+
+const MCP_ALLOWED_HOSTNAMES = ["concierge.j1.io", "localhost", "127.0.0.1", "[::1]"];
 
 function createConciergeServer(ctx: DurableObjectState, env: DebugEnv) {
 	const server = new McpServer({
@@ -176,8 +178,10 @@ export class ConciergeMcpRuntime extends DurableObject<DebugEnv> {
 	fetch(request: Request) {
 		const pathname = new URL(request.url).pathname;
 		const route = pathname === "/debug/mcp" ? "/debug/mcp" : "/mcp";
-		const server = createConciergeServer(this.ctx, this.env);
-		return createMcpHandler(server, { route })(
+		return createMcpHandler(() => createConciergeServer(this.ctx, this.env), {
+			allowedHostnames: MCP_ALLOWED_HOSTNAMES,
+			route,
+		})(
 			request,
 			this.env,
 			this.ctx as unknown as ExecutionContext,
@@ -201,7 +205,7 @@ const oauthProvider = new OAuthProvider<DebugEnv>({
 	apiHandler: oauthMcpHandler,
 	apiRoute: "/mcp",
 	authorizeEndpoint: "/authorize",
-	clientRegistrationEndpoint: "/register",
+	clientIdMetadataDocumentEnabled: true,
 	defaultHandler: { fetch: handleAccessRequest as any },
 	tokenEndpoint: "/token",
 });

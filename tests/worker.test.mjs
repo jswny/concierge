@@ -41,10 +41,7 @@ test("keeps the production MCP route behind OAuth", async () => {
 	const mcpResponse = await productionServer.fetch("/mcp", mcpInitializeRequest());
 	assert.equal(mcpResponse.status, 401);
 	assert.match(mcpResponse.headers.get("WWW-Authenticate") ?? "", /resource_metadata=/);
-	assert.deepEqual(await mcpResponse.json(), {
-		error: "invalid_token",
-		error_description: "Missing or invalid access token",
-	});
+	assert.equal(await mcpResponse.text(), "");
 
 	const registrationResponse = await productionServer.fetch("/register", {
 		method: "POST",

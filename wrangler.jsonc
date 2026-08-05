@@ -50,7 +50,11 @@
 		}
 	],
 	"observability": {
-		"enabled": true
+		"enabled": true,
+		"traces": {
+			"enabled": true,
+			"head_sampling_rate": 1
+		}
 	},
 	"dev": {
 		"port": 8788

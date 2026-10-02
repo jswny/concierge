@@ -207,6 +207,7 @@ const oauthProvider = new OAuthProvider<DebugEnv>({
 	authorizeEndpoint: "/authorize",
 	clientIdMetadataDocumentEnabled: true,
 	defaultHandler: { fetch: handleAccessRequest as any },
+	resourceMetadata: { resource: "https://concierge.j1.io/mcp" },
 	tokenEndpoint: "/token",
 });
 

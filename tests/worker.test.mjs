@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, sign, verify } from "node:crypto";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
@@ -11,6 +11,13 @@ import { createTestHarness } from "wrangler";
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const MODERN_PROTOCOL_VERSION = "2026-07-28";
 const LEGACY_PROTOCOL_VERSION = "2025-11-25";
+const GOOGLE_KEYS = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const GOOGLE_CREDENTIALS = {
+	type: "service_account",
+	client_email: "concierge@j1-concierge.iam.gserviceaccount.com",
+	private_key_id: "test-google-key-id",
+	private_key: GOOGLE_KEYS.privateKey.export({ type: "pkcs8", format: "pem" }),
+};
 const TEST_SECRETS = {
 	ACCESS_AUTHORIZATION_URL: "https://access.example/authorize",
 	ACCESS_CLIENT_ID: "test-access-client",
@@ -19,6 +26,7 @@ const TEST_SECRETS = {
 	ACCESS_TOKEN_URL: "https://access.example/token",
 	COOKIE_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000",
 	NOTION_TOKEN: "test-notion-token",
+	GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify(GOOGLE_CREDENTIALS),
 };
 
 const debugServer = createConciergeHarness(true);
@@ -388,6 +396,12 @@ test("serves the code tool over the modern MCP protocol", async () => {
 				readOnlyHint: false,
 			});
 			assert.deepEqual(tool.outputSchema?.required, ["result"]);
+			const discovery = await client.callTool({
+				name: "code",
+				arguments: { code: 'async () => await codemode.search("gmail email settings")' },
+			});
+			assert.equal(discovery.isError, undefined);
+			assert.equal(discovery.structuredContent.result.results[0].path, "google.request");
 
 			const result = await client.callTool({
 				name: "code",
@@ -492,14 +506,172 @@ test("calls Notion with the configured API contract", async () => {
 	}
 });
 
-function createConciergeHarness(debugEnabled) {
+test("calls Google Workspace through signed JWTs, fixed delegation, and a private token cache", async (t) => {
+	const originalFetch = globalThis.fetch;
+	const requests = [];
+	let rejectToken = false;
+	let expiresIn = 3600;
+	let apiStatus = 200;
+	let apiPayload = { emailAddress: "joe@j1.io" };
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		const url = new URL(request.url);
+		assert.ok(!["sts.mtls.googleapis.com", "iamcredentials.googleapis.com"].includes(url.hostname), "Legacy federation must not be used.");
+		if (!["oauth2.googleapis.com", "gmail.googleapis.com"].includes(url.hostname)) {
+			return originalFetch(input, init);
+		}
+		requests.push(request.clone());
+		if (url.hostname === "oauth2.googleapis.com") {
+			const body = new URLSearchParams(await request.text());
+			assert.equal(body.get("grant_type"), "urn:ietf:params:oauth:grant-type:jwt-bearer");
+			const [header, payload, signature] = body.get("assertion").split(".");
+			assert.deepEqual(JSON.parse(Buffer.from(header, "base64url")), { alg: "RS256", typ: "JWT", kid: "test-google-key-id" });
+			assert.ok(verify("RSA-SHA256", Buffer.from(`${header}.${payload}`), GOOGLE_KEYS.publicKey, Buffer.from(signature, "base64url")));
+			const jwt = JSON.parse(Buffer.from(payload, "base64url"));
+			assert.equal(jwt.sub, "joe@j1.io");
+			assert.equal(jwt.iss, "concierge@j1-concierge.iam.gserviceaccount.com");
+			assert.equal(jwt.aud, "https://oauth2.googleapis.com/token");
+			assert.equal(jwt.exp - jwt.iat, 600);
+			assert.deepEqual(jwt.scope.split(" ").sort(), [
+				"https://mail.google.com/",
+				"https://www.googleapis.com/auth/gmail.settings.basic",
+				"https://www.googleapis.com/auth/gmail.settings.sharing",
+			].sort());
+			if (rejectToken) return Response.json({ error_description: "do-not-expose-workspace-secret" }, { status: 400 });
+			return Response.json({ access_token: "test-google-workspace-token", expires_in: expiresIn });
+		}
+		assert.equal(request.headers.get("Authorization"), "Bearer test-google-workspace-token");
+		if (apiStatus === 204) return new Response(null, { status: 204 });
+		if (apiStatus === 302) return new Response(null, { status: 302, headers: { Location: "https://evil.example/steal" } });
+		return Response.json(apiPayload, { status: apiStatus, headers: { "Retry-After": "5" } });
+	};
+	const count = (hostname) => requests.filter((request) => new URL(request.url).hostname === hostname).length;
+	const call = (client, options) => client.callTool({ name: "code", arguments: {
+		code: `async () => await google.request(${JSON.stringify(options)})`,
+	} });
+	const profile = { service: "gmail", method: "GET", path: "/gmail/v1/users/me/profile" };
+	try {
+		await withMcpClient(undefined, async (client) => {
+			await t.test("rejects invalid services, external URLs, other users, traversal, and caller-selected credentials before authentication", async () => {
+				for (const options of [
+					{ ...profile, service: "drive" },
+					{ ...profile, method: "TRACE" },
+					{ ...profile, path: "https://evil.example/steal" },
+					{ ...profile, path: "/gmail/v1/users/other@example.com/profile" },
+					{ ...profile, path: "/gmail/v1/users/me/../../other/profile" },
+					{ ...profile, path: "/gmail/v1/users/me/%2e%2e/%2e%2e/other/profile" },
+					{ ...profile, path: "/gmail/v1/users/me/profile?access_token=evil" },
+					{ ...profile, query: { access_token: "evil" } },
+					{ ...profile, query: { bad: { nested: true } } },
+					{ ...profile, sub: "other@example.com" },
+					{ ...profile, body: {} },
+				]) {
+					const result = await call(client, options);
+					assert.equal(result.isError, true, JSON.stringify(options));
+				}
+				assert.equal(requests.length, 0);
+			});
+			await t.test("deduplicates concurrent authentication and hides all credentials from MCP results", async () => {
+				const result = await client.callTool({ name: "code", arguments: {
+					code: `async () => await Promise.all([google.request(${JSON.stringify(profile)}), google.request(${JSON.stringify(profile)}), google.request(${JSON.stringify(profile)})])`,
+				} });
+				assert.equal(result.isError, undefined);
+				assert.deepEqual(result.structuredContent.result, Array(3).fill({ emailAddress: "joe@j1.io" }));
+				assert.equal(count("oauth2.googleapis.com"), 1);
+				assert.doesNotMatch(JSON.stringify(result), /test-google-workspace-token/);
+				assert.ok(!JSON.stringify(result).includes(GOOGLE_CREDENTIALS.private_key));
+				assert.doesNotMatch(JSON.stringify(result), /PRIVATE KEY/);
+			});
+			await t.test("supports query arrays, JSON writes, settings, and empty delete responses without reauth", async () => {
+				await call(client, { ...profile, path: "/gmail/v1/users/me/messages", query: { labelIds: ["INBOX", "UNREAD"], maxResults: 2 } });
+				const list = requests.at(-1);
+				assert.deepEqual(new URL(list.url).searchParams.getAll("labelIds"), ["INBOX", "UNREAD"]);
+				assert.equal(new URL(list.url).searchParams.get("maxResults"), "2");
+				assert.equal(list.method, "GET");
+				const body = { name: "Test" };
+				await call(client, { service: "gmail", method: "POST", path: "/gmail/v1/users/me/labels", body });
+				assert.equal(requests.at(-1).method, "POST");
+				assert.deepEqual(await requests.at(-1).json(), body);
+				await call(client, { service: "gmail", method: "PUT", path: "/gmail/v1/users/me/settings/language", body: { displayLanguage: "en" } });
+				assert.equal(requests.at(-1).method, "PUT");
+				apiStatus = 204;
+				assert.deepEqual((await call(client, { service: "gmail", method: "DELETE", path: "/gmail/v1/users/me/labels/test" })).structuredContent, { result: null });
+				apiStatus = 200;
+				assert.equal(count("oauth2.googleapis.com"), 1);
+			});
+			await t.test("invalidates rejected tokens without replaying mutations, follows no redirects, and surfaces API errors", async () => {
+				apiStatus = 401;
+				apiPayload = { error: { message: "Rejected test-google-workspace-token" } };
+				const before = count("gmail.googleapis.com");
+				const result = await call(client, { service: "gmail", method: "POST", path: "/gmail/v1/users/me/messages/send", body: { raw: "test" } });
+				assert.equal(result.isError, true);
+				assert.match(result.content[0].text, /HTTP 401/);
+				assert.doesNotMatch(result.content[0].text, /test-google-workspace-token/);
+				assert.equal(count("gmail.googleapis.com"), before + 1);
+				apiStatus = 302;
+				assert.equal((await call(client, profile)).isError, true);
+				assert.equal(count("oauth2.googleapis.com"), 2);
+				apiStatus = 429;
+				apiPayload = { error: { message: "Rate limit exceeded" } };
+				assert.match((await call(client, profile)).content[0].text, /Rate limit exceeded.*Retry-After: 5s/);
+				apiStatus = 401;
+				await call(client, profile);
+				apiStatus = 200;
+			});
+			await t.test("recovers after authentication failures without leaking upstream error bodies", async () => {
+				rejectToken = true;
+				const result = await call(client, profile);
+				assert.equal(result.isError, true);
+				assert.match(result.content[0].text, /Google .*returned HTTP/);
+				assert.doesNotMatch(JSON.stringify(result), /do-not-expose/);
+				rejectToken = false;
+				expiresIn = 60;
+				assert.match((await call(client, profile)).content[0].text, /invalid access token/);
+				expiresIn = 61;
+				assert.equal((await call(client, profile)).isError, undefined);
+				const before = count("oauth2.googleapis.com");
+				await new Promise((resolve) => setTimeout(resolve, 1100));
+				expiresIn = 3600;
+				assert.equal((await call(client, profile)).isError, undefined);
+				assert.equal(count("oauth2.googleapis.com"), before + 1);
+			});
+		});
+		await t.test("rejects invalid or mismatched service-account credentials without leaking them", async () => {
+			const before = requests.length;
+			for (const credentials of [
+				'{"private_key":"do-not-expose-key"',
+				JSON.stringify({ ...GOOGLE_CREDENTIALS, client_email: "other@example.com" }),
+				JSON.stringify({ ...GOOGLE_CREDENTIALS, private_key: "do-not-expose-key" }),
+				JSON.stringify({ ...GOOGLE_CREDENTIALS, private_key_id: "" }),
+			]) {
+				const server = createConciergeHarness(true, { GOOGLE_SERVICE_ACCOUNT_JSON: credentials });
+				try {
+					await server.listen();
+					await withMcpClient(undefined, async (client) => {
+						const result = await call(client, profile);
+						assert.equal(result.isError, true);
+						assert.match(result.content[0].text, /valid key for the Concierge service account/);
+						assert.doesNotMatch(JSON.stringify(result), /do-not-expose|PRIVATE KEY/);
+					}, server);
+				} finally {
+					await server.close();
+				}
+			}
+			assert.equal(requests.length, before);
+		});
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+function createConciergeHarness(debugEnabled, secrets = {}) {
 	return createTestHarness({
 		root: ROOT,
 		workers: [
 			{
 				bindingOverrides: { BROWSER: "browser-mock" },
 				configPath: "./wrangler.jsonc",
-				secrets: TEST_SECRETS,
+				secrets: { ...TEST_SECRETS, ...secrets },
 				vars: { CONCIERGE_DEBUG: String(debugEnabled) },
 			},
 			{
@@ -513,12 +685,12 @@ function createConciergeHarness(debugEnabled) {
 	});
 }
 
-async function withMcpClient(options, run) {
+async function withMcpClient(options, run, server = debugServer) {
 	const client = new Client(
 		{ name: "concierge-integration-test", version: "1.0.0" },
 		options,
 	);
-	const worker = debugServer.getWorker("concierge");
+	const worker = server.getWorker("concierge");
 	const transport = new StreamableHTTPClientTransport(debugMcpUrl, {
 		fetch: (input, init) => worker.fetch(input, init),
 	});

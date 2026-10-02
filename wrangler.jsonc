@@ -67,7 +67,8 @@
 			"ACCESS_AUTHORIZATION_URL",
 			"ACCESS_JWKS_URL",
 			"COOKIE_ENCRYPTION_KEY",
-			"NOTION_TOKEN"
+			"NOTION_TOKEN",
+			"GOOGLE_SERVICE_ACCOUNT_JSON"
 		]
 	},
 	"upload_source_maps": true

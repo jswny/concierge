@@ -11,6 +11,8 @@ import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { handleAccessRequest } from "./access-handler";
 import { CloudflareConnector } from "./cloudflare-connector";
+import { GoogleWorkspaceAuth } from "./integrations/google/auth";
+import { GoogleConnector } from "./integrations/google/connector";
 import { NotionConnector } from "./notion-connector";
 
 export { CodemodeRuntime } from "@cloudflare/codemode";
@@ -27,13 +29,21 @@ type TextToolResult = {
 
 const MCP_ALLOWED_HOSTNAMES = ["concierge.j1.io", "localhost", "127.0.0.1", "[::1]"];
 
-function createConciergeServer(ctx: DurableObjectState, env: DebugEnv) {
+function createConciergeServer(
+	ctx: DurableObjectState,
+	env: DebugEnv,
+	googleAuth: GoogleWorkspaceAuth,
+) {
 	const server = new McpServer({
 		name: "Concierge MCP",
 		version: "1.0.0",
 	});
 	const runtime = createCodemodeRuntime({
-		connectors: [new CloudflareConnector(ctx, env), new NotionConnector(ctx, env)],
+		connectors: [
+			new CloudflareConnector(ctx, env),
+			new NotionConnector(ctx, env),
+			new GoogleConnector(ctx, env, googleAuth),
+		],
 		ctx,
 		executor: new DynamicWorkerExecutor({ loader: env.LOADER }),
 		transformResult: (result) => truncateResult(result),
@@ -41,6 +51,8 @@ function createConciergeServer(ctx: DurableObjectState, env: DebugEnv) {
 	const codeToolDescription = runtime.tool({
 		connectorHints: {
 			cloudflare: "Read rendered public webpages as Markdown with Cloudflare Browser Run.",
+			google:
+				"Call Google Workspace APIs as joe@j1.io through google.request. Gmail email and settings are enabled; consult official API documentation for request details.",
 			notion:
 				"Call the Notion REST API through notion.request with the server-side NOTION_TOKEN. Consult the current official Notion API documentation for request details.",
 		},
@@ -175,10 +187,12 @@ function handleMcpRequest(request: Request, env: DebugEnv) {
 }
 
 export class ConciergeMcpRuntime extends DurableObject<DebugEnv> {
+	private readonly googleAuth = new GoogleWorkspaceAuth(this.env);
+
 	fetch(request: Request) {
 		const pathname = new URL(request.url).pathname;
 		const route = pathname === "/debug/mcp" ? "/debug/mcp" : "/mcp";
-		return createMcpHandler(() => createConciergeServer(this.ctx, this.env), {
+		return createMcpHandler(() => createConciergeServer(this.ctx, this.env, this.googleAuth), {
 			allowedHostnames: MCP_ALLOWED_HOSTNAMES,
 			route,
 		})(

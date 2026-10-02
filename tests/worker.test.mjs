@@ -96,7 +96,7 @@ test("authorizes a CIMD client through Access and refreshes its MCP token", asyn
 				client_id: clientId,
 				client_name: "Test MCP Client",
 				grant_types: ["authorization_code", "refresh_token"],
-				redirect_uris: [redirectUri],
+				redirect_uris: [redirectUri, "https://client.example/other-callback"],
 				response_types: ["code"],
 				token_endpoint_auth_method: "none",
 			});
@@ -126,19 +126,55 @@ test("authorizes a CIMD client through Access and refreshes its MCP token", asyn
 		const consent = await worker.fetch(authorizeUrl);
 		assert.equal(consent.status, 200);
 		const html = await consent.text();
-		const form = new URLSearchParams();
-		for (const name of ["state", "csrf_token"]) {
-			const match = html.match(new RegExp(`name="${name}" value="([^"]+)"`));
-			assert.ok(match, `Missing consent field: ${name}`);
-			form.set(name, match[1]);
+		const form = consentForm(html, "approve");
+		assert.doesNotMatch(html, /name="(?:state|csrf_token)"/);
+		assert.match(html, /Published by <strong>client.example<\/strong>/);
+		assert.equal(consent.headers.get("X-Frame-Options"), "DENY");
+		assert.equal(consent.headers.get("Content-Security-Policy"), "frame-ancestors 'none'");
+		assert.match(consent.headers.get("Set-Cookie"), /Secure/);
+		assert.match(consent.headers.get("Set-Cookie"), /HttpOnly/);
+		const consentCookies = responseCookies(consent);
+		for (const cookie of ["", consentCookies.replace(/=.*/, "=wrong-browser")]) {
+			const unbound = await worker.fetch("https://concierge.j1.io/authorize", {
+				method: "POST", redirect: "manual", headers: { Cookie: cookie }, body: form,
+			});
+			assert.equal(unbound.status, 400);
 		}
+		// Extra form fields must never override the server-stored authorization request.
+		form.set("state", "forged-state");
+		form.set("redirect_uri", "https://evil.example/callback");
 		const approval = await worker.fetch("https://concierge.j1.io/authorize", {
 			method: "POST",
 			redirect: "manual",
-			headers: { Cookie: consent.headers.get("Set-Cookie").split(";")[0] },
+			headers: { Cookie: consentCookies },
 			body: form,
 		});
 		assert.equal(approval.status, 302);
+		const replayedApproval = await worker.fetch("https://concierge.j1.io/authorize", {
+			method: "POST", redirect: "manual", headers: { Cookie: consentCookies }, body: form,
+		});
+		assert.equal(replayedApproval.status, 400);
+		const approvalCookies = responseCookies(approval);
+		const remembered = await worker.fetch(authorizeUrl, {
+			redirect: "manual", headers: { Cookie: approvalCookies },
+		});
+		assert.equal(remembered.status, 302);
+		assert.equal(new URL(remembered.headers.get("Location")).origin, "https://access.example");
+		const tamperedRemembered = await worker.fetch(authorizeUrl, {
+			redirect: "manual", headers: { Cookie: approvalCookies.replace(/(__Host-oauth-approvals=)[^;]+/, "$1tampered") },
+		});
+		assert.equal(tamperedRemembered.status, 200);
+		const changedRedirect = new URL(authorizeUrl);
+		changedRedirect.searchParams.set("redirect_uri", "https://client.example/other-callback");
+		const newConsent = await worker.fetch(changedRedirect, {
+			redirect: "manual", headers: { Cookie: approvalCookies },
+		});
+		assert.equal(newConsent.status, 200);
+		const changedScope = new URL(authorizeUrl);
+		changedScope.searchParams.set("scope", "new-permission");
+		assert.equal((await worker.fetch(changedScope, {
+			redirect: "manual", headers: { Cookie: approvalCookies },
+		})).status, 200);
 		const upstreamUrl = new URL(approval.headers.get("Location"));
 		assert.equal(upstreamUrl.origin, "https://access.example");
 		const callbackUrl = new URL("https://concierge.j1.io/callback");
@@ -146,8 +182,17 @@ test("authorizes a CIMD client through Access and refreshes its MCP token", asyn
 			code: "test-access-code",
 			state: upstreamUrl.searchParams.get("state"),
 		}).toString();
-		const callback = await worker.fetch(callbackUrl, { redirect: "manual" });
+		const unboundCallback = await worker.fetch(callbackUrl, { redirect: "manual" });
+		assert.equal(unboundCallback.status, 400);
+		assert.equal(upstreamTokenRequest, undefined);
+		const callback = await worker.fetch(callbackUrl, {
+			redirect: "manual", headers: { Cookie: approvalCookies },
+		});
 		assert.equal(callback.status, 302);
+		const replayedCallback = await worker.fetch(callbackUrl, {
+			redirect: "manual", headers: { Cookie: approvalCookies },
+		});
+		assert.equal(replayedCallback.status, 400);
 		assert.equal(upstreamTokenRequest.get("code"), "test-access-code");
 		assert.equal(upstreamTokenRequest.get("redirect_uri"), "https://concierge.j1.io/callback");
 		assert.equal(
@@ -192,6 +237,113 @@ test("authorizes a CIMD client through Access and refreshes its MCP token", asyn
 			assert.deepEqual(tools.map((tool) => tool.name), ["code"]);
 		} finally {
 			await client.close();
+		}
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("handles consent denial, expired transactions, and independent upstream logins", async () => {
+	const clientId = "https://consent-client.example/metadata.json";
+	const redirectUri = "https://consent-client.example/callback";
+	const worker = productionServer.getWorker("concierge");
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		if (request.url === clientId) {
+			return Response.json({
+				client_id: clientId,
+				client_name: '<script>alert("client")</script>',
+				redirect_uris: [redirectUri],
+				response_types: ["code"],
+				token_endpoint_auth_method: "none",
+			});
+		}
+		if (request.url === TEST_SECRETS.ACCESS_TOKEN_URL) {
+			assert.fail("Denied or invalid callbacks must not exchange an Access code");
+		}
+		return originalFetch(input, init);
+	};
+	async function start(state) {
+		const url = new URL("https://concierge.j1.io/authorize");
+		url.search = new URLSearchParams({
+			client_id: clientId, redirect_uri: redirectUri,
+			response_type: "code", resource: "https://concierge.j1.io/mcp", state,
+			code_challenge: createHash("sha256").update(randomBytes(32)).digest("base64url"),
+			code_challenge_method: "S256",
+		}).toString();
+		const response = await worker.fetch(url, { redirect: "manual" });
+		assert.equal(response.status, 200);
+		const html = await response.text();
+		assert.doesNotMatch(html, /<script>/);
+		assert.match(html, /&#60;script&#62;/);
+		return { form: consentForm(html, "approve"), cookie: responseCookies(response) };
+	}
+	async function submit(consent, decision) {
+		consent.form.set("decision", decision);
+		return worker.fetch("https://concierge.j1.io/authorize", {
+			method: "POST", redirect: "manual", headers: { Cookie: consent.cookie }, body: consent.form,
+		});
+	}
+	try {
+		const invalidRedirect = new URL("https://concierge.j1.io/authorize");
+		invalidRedirect.search = new URLSearchParams({
+			client_id: clientId, redirect_uri: "https://evil.example/callback", response_type: "code",
+		}).toString();
+		const invalid = await worker.fetch(invalidRedirect, { redirect: "manual" });
+		assert.equal(invalid.status, 400);
+		assert.equal(invalid.headers.get("Location"), null);
+		const validRedirect = new URL(invalidRedirect);
+		validRedirect.searchParams.set("redirect_uri", redirectUri);
+		validRedirect.searchParams.set("state", "invalid-request-state");
+		const safeError = await worker.fetch(validRedirect, { redirect: "manual" });
+		assert.equal(safeError.status, 302);
+		const errorDestination = new URL(safeError.headers.get("Location"));
+		assert.equal(errorDestination.origin + errorDestination.pathname, redirectUri);
+		assert.equal(errorDestination.searchParams.get("error"), "invalid_request");
+		assert.equal(errorDestination.searchParams.get("state"), "invalid-request-state");
+
+		const denied = await start("denied-state");
+		const denial = await submit(denied, "deny");
+		assert.equal(denial.status, 302);
+		const destination = new URL(denial.headers.get("Location"));
+		assert.equal(destination.origin + destination.pathname, redirectUri);
+		assert.equal(destination.searchParams.get("error"), "access_denied");
+		assert.equal(destination.searchParams.get("state"), "denied-state");
+		assert.equal(destination.searchParams.get("iss"), "https://concierge.j1.io");
+		assert.equal((await submit(denied, "approve")).status, 400);
+
+		const expired = await start("expired-state");
+		const key = `transaction:${createHash("sha256").update(expired.form.get("handle")).digest("hex")}`;
+		const { OAUTH_KV } = await worker.getEnv();
+		const { keys } = await OAUTH_KV.list({ prefix: key });
+		assert.equal(keys.length, 1);
+		assert.ok(keys[0].expiration > Date.now() / 1000 + 550);
+		assert.ok(keys[0].expiration <= Date.now() / 1000 + 601);
+		// Removing the KV entry simulates expiry without waiting ten minutes.
+		await OAUTH_KV.delete(key);
+		assert.equal((await submit(expired, "approve")).status, 400);
+
+		const first = await start("first-state");
+		const second = await start("second-state");
+		assert.notEqual(first.cookie.split("=")[0], second.cookie.split("=")[0]);
+		const approvals = [await submit(first, "approve"), await submit(second, "approve")];
+		const cookies = approvals.map(responseCookies);
+		for (const [index, approval] of approvals.entries()) {
+			assert.equal(approval.status, 302);
+			const callback = new URL("https://concierge.j1.io/callback");
+			callback.searchParams.set("state", new URL(approval.headers.get("Location")).searchParams.get("state"));
+			callback.searchParams.set("error", "access_denied");
+			assert.equal((await worker.fetch(callback, {
+				redirect: "manual", headers: { Cookie: cookies[1 - index] },
+			})).status, 400);
+			const result = await worker.fetch(callback, {
+				redirect: "manual", headers: { Cookie: cookies.join("; ") },
+			});
+			assert.equal(result.status, 302);
+			const clientCallback = new URL(result.headers.get("Location"));
+			assert.equal(clientCallback.searchParams.get("state"), index === 0 ? "first-state" : "second-state");
+			assert.equal(clientCallback.searchParams.get("error"), "access_denied");
 		}
 	} finally {
 		globalThis.fetch = originalFetch;
@@ -377,6 +529,19 @@ async function withMcpClient(options, run) {
 	} finally {
 		await client.close();
 	}
+}
+
+function consentForm(html, decision) {
+	const match = html.match(/name="handle" value="([^"]+)"/);
+	assert.ok(match, "Missing consent handle");
+	return new URLSearchParams({ handle: match[1], decision });
+}
+
+function responseCookies(response) {
+	return response.headers.getSetCookie()
+		.filter((cookie) => !/Max-Age=0(?:;|$)/i.test(cookie))
+		.map((cookie) => cookie.split(";")[0])
+		.join("; ");
 }
 
 function mcpInitializeRequest(extraHeaders = {}) {

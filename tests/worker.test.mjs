@@ -115,7 +115,7 @@ test("authorizes a CIMD client through Access and refreshes its MCP token", asyn
 		}
 		if (request.url === TEST_SECRETS.ACCESS_TOKEN_URL) {
 			upstreamTokenRequest = new URLSearchParams(await request.text());
-			return Response.json({ access_token: "test-upstream-token", id_token: idToken });
+			return Response.json({ access_token: "test-upstream-token", token_type: "Bearer", id_token: idToken });
 		}
 		if (request.url === TEST_SECRETS.ACCESS_JWKS_URL) {
 			return Response.json({ keys: [{ ...publicKey.export({ format: "jwk" }), kid: "test-key" }] });
@@ -206,6 +206,9 @@ test("authorizes a CIMD client through Access and refreshes its MCP token", asyn
 		});
 		assert.equal(replayedCallback.status, 400);
 		assert.equal(upstreamTokenRequest.get("code"), "test-access-code");
+		assert.equal(upstreamTokenRequest.get("client_id"), TEST_SECRETS.ACCESS_CLIENT_ID);
+		assert.equal(upstreamTokenRequest.get("client_secret"), TEST_SECRETS.ACCESS_CLIENT_SECRET);
+		assert.equal(upstreamTokenRequest.get("grant_type"), "authorization_code");
 		assert.equal(upstreamTokenRequest.get("redirect_uri"), "https://concierge.j1.io/callback");
 		assert.equal(
 			createHash("sha256").update(upstreamTokenRequest.get("code_verifier")).digest("base64url"),
@@ -255,7 +258,7 @@ test("authorizes a CIMD client through Access and refreshes its MCP token", asyn
 	}
 });
 
-test("validates Access ID tokens before issuing MCP authorization codes", async (t) => {
+test("validates Access OAuth responses and ID tokens before issuing MCP authorization codes", async (t) => {
 	const clientId = "https://identity-client.example/metadata.json";
 	const redirectUri = "https://identity-client.example/callback";
 	const worker = productionServer.getWorker("concierge");
@@ -275,6 +278,7 @@ test("validates Access ID tokens before issuing MCP authorization codes", async 
 		{ name: "rejects the wrong audience", claims: { aud: "another-access-client" } },
 		{ name: "rejects a missing audience", claims: { aud: undefined } },
 		{ name: "rejects untrusted additional audiences", claims: { aud: [TEST_SECRETS.ACCESS_CLIENT_ID, "another-access-client"] } },
+		{ name: "rejects additional audiences even with the correct authorized party", claims: { aud: [TEST_SECRETS.ACCESS_CLIENT_ID, "another-access-client"], azp: TEST_SECRETS.ACCESS_CLIENT_ID } },
 		{ name: "rejects the wrong authorized party", claims: { azp: "another-access-client" } },
 		{ name: "rejects a missing expiry", claims: { exp: undefined } },
 		{ name: "rejects a string expiry", claims: { exp: String(now + 300) } },
@@ -292,9 +296,30 @@ test("validates Access ID tokens before issuing MCP authorization codes", async 
 		{ name: "rejects an unexpected signing algorithm", claims: {}, header: { alg: "RS384" } },
 		{ name: "rejects an unsigned token", claims: {}, unsigned: true },
 		{ name: "rejects a malformed token", token: "do-not-expose-token" },
+		{ name: "accepts a matching callback issuer", callback: { iss: ACCESS_ISSUER }, accepted: true },
+		{ name: "rejects the wrong callback issuer", callback: { iss: "https://other.example" }, noExchange: true },
+		{ name: "rejects duplicate authorization codes", duplicateCode: true, noExchange: true },
+		{ name: "rejects implicit ID tokens in the callback", callback: { id_token: "do-not-expose-token" }, noExchange: true },
+		{ name: "rejects implicit tokens in the callback", callback: { token: "do-not-expose-token" }, noExchange: true },
+		{ name: "rejects JARM responses in the callback", callback: { response: "do-not-expose-token" }, noExchange: true },
+		{ name: "rejects a missing access token", tokenFields: { access_token: undefined } },
+		{ name: "rejects an empty access token", tokenFields: { access_token: "" } },
+		{ name: "rejects a missing ID token", tokenFields: { id_token: undefined } },
+		{ name: "rejects an empty ID token", tokenFields: { id_token: "" } },
+		{ name: "rejects a missing token type", tokenFields: { token_type: undefined } },
+		{ name: "rejects an unsupported token type", tokenFields: { token_type: "do-not-expose-token" } },
+		{ name: "rejects invalid token expiry metadata", tokenFields: { expires_in: "invalid" } },
+		{ name: "rejects an unsolicited ID-token nonce", claims: { nonce: "do-not-expose-nonce" } },
+		{ name: "hides upstream token endpoint errors", tokenFields: { error: "invalid_grant", error_description: "do-not-expose-error" }, tokenStatus: 400 },
+		{ name: "hides upstream token endpoint failures", tokenStatus: 503 },
+		{ name: "rejects malformed token response bodies", rawTokenBody: "do-not-expose-error" },
+		{ name: "does not follow token endpoint redirects", tokenStatus: 302 },
+		{ name: "does not follow JWKS endpoint redirects", jwksRedirect: true },
 	];
 	let idToken;
+	let currentExample;
 	let exchangeCount = 0;
+	let redirectedRequests = 0;
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
@@ -303,16 +328,24 @@ test("validates Access ID tokens before issuing MCP authorization codes", async 
 		}
 		if (request.url === TEST_SECRETS.ACCESS_TOKEN_URL) {
 			exchangeCount++;
-			return Response.json({ access_token: "do-not-expose-upstream-token", id_token: idToken });
+			if (currentExample.rawTokenBody) return new Response(currentExample.rawTokenBody, { headers: { "Content-Type": "application/json" } });
+			if (currentExample.tokenStatus === 302) return new Response(null, { status: 302, headers: { Location: "https://untrusted.example/oauth" } });
+			return Response.json({ access_token: "do-not-expose-upstream-token", token_type: "Bearer", id_token: idToken, ...currentExample.tokenFields }, { status: currentExample.tokenStatus ?? 200 });
 		}
 		if (request.url === TEST_SECRETS.ACCESS_JWKS_URL) {
+			if (currentExample.jwksRedirect) return new Response(null, { status: 302, headers: { Location: "https://untrusted.example/jwks" } });
 			return Response.json({ keys: [{ ...publicKey.export({ format: "jwk" }), kid: "identity-test-key", alg: "RS256", use: "sig" }] });
+		}
+		if (new URL(request.url).hostname === "untrusted.example") {
+			redirectedRequests++;
+			return Response.json({});
 		}
 		return originalFetch(input, init);
 	};
 	try {
 		for (const example of cases) {
 			await t.test(example.name, async () => {
+				currentExample = example;
 				const header = { alg: "RS256", kid: "identity-test-key", ...example.header };
 				if (example.unsigned) header.alg = "none";
 				const data = [header, { ...validClaims, ...example.claims }]
@@ -334,9 +367,13 @@ test("validates Access ID tokens before issuing MCP authorization codes", async 
 				});
 				assert.equal(approval.status, 302);
 				const callbackUrl = new URL("https://concierge.j1.io/callback");
-				callbackUrl.search = new URLSearchParams({ code: "test-access-code", state: new URL(approval.headers.get("Location")).searchParams.get("state") }).toString();
+				callbackUrl.search = new URLSearchParams({ code: "test-access-code", state: new URL(approval.headers.get("Location")).searchParams.get("state"), ...example.callback }).toString();
+				if (example.duplicateCode) callbackUrl.searchParams.append("code", "another-code");
 				const callbackOptions = { redirect: "manual", headers: { Cookie: responseCookies(approval) } };
+				const beforeExchange = exchangeCount;
 				const result = await worker.fetch(callbackUrl, callbackOptions);
+				assert.equal(exchangeCount - beforeExchange, example.noExchange ? 0 : 1);
+				assert.equal(redirectedRequests, 0);
 				if (example.accepted) {
 					assert.equal(result.status, 302);
 					const destination = new URL(result.headers.get("Location"));
@@ -346,6 +383,7 @@ test("validates Access ID tokens before issuing MCP authorization codes", async 
 					assert.equal(result.status, 400);
 					assert.equal(result.headers.get("Location"), null);
 					assert.equal(await result.text(), "Access identity could not be verified.");
+					assert.match(result.headers.get("Set-Cookie"), /Max-Age=0/);
 					const count = exchangeCount;
 					assert.equal((await worker.fetch(callbackUrl, callbackOptions)).status, 400);
 					assert.equal(exchangeCount, count, "Rejected identity transactions must not be replayable");

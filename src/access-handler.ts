@@ -1,5 +1,4 @@
-import { Buffer } from "node:buffer";
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import * as oidc from "oauth4webapi";
 import {
 	AuthorizationError,
 	authorizationErrorRedirect,
@@ -73,13 +72,13 @@ async function handleAccessRoute(request: Request, env: EnvWithOauth) {
 			return new Response("Missing authorization code", { status: 400, headers: resumed.headers });
 		}
 
-		const tokens = await exchangeAccessCode(request, env, code, resumed.data.codeVerifier);
-		let user;
+		let identity;
 		try {
-			user = await verifyToken(env, tokens.id_token);
+			identity = await authenticateWithAccess(request, env, resumed.data.codeVerifier);
 		} catch {
 			return new Response("Access identity could not be verified.", { status: 400, headers: resumed.headers });
 		}
+		const { tokens, user } = identity;
 		const { redirectTo } = await oauth.completeAuthorization({
 			metadata: { label: user.name },
 			props: {
@@ -104,10 +103,8 @@ async function redirectToAccess(
 	authRequest: AuthRequest,
 	headers?: Headers,
 ) {
-	const codeVerifier = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
-	const codeChallenge = Buffer.from(
-		await crypto.subtle.digest("SHA-256", new TextEncoder().encode(codeVerifier)),
-	).toString("base64url");
+	const codeVerifier = oidc.generateRandomCodeVerifier();
+	const codeChallenge = await oidc.calculatePKCECodeChallenge(codeVerifier);
 	const upstream = await env.OAUTH_PROVIDER.beginUpstream(authRequest, {
 		data: { codeVerifier },
 		headers,
@@ -129,42 +126,31 @@ async function redirectToAccess(
 	return new Response(null, { status: 302, headers: upstream.headers });
 }
 
-async function exchangeAccessCode(request: Request, env: Env, code: string, codeVerifier: string) {
-	const response = await fetch(env.ACCESS_TOKEN_URL, {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/x-www-form-urlencoded",
-			Accept: "application/json",
-		},
-		body: new URLSearchParams({
-			client_id: env.ACCESS_CLIENT_ID,
-			client_secret: env.ACCESS_CLIENT_SECRET,
-			code,
-			grant_type: "authorization_code",
-			redirect_uri: new URL("/callback", request.url).href,
-			code_verifier: codeVerifier,
-		}),
-	});
-	if (!response.ok) {
-		throw new Error(`Access token exchange failed with HTTP ${response.status}.`);
-	}
-	const tokens = (await response.json()) as { access_token?: unknown; id_token?: unknown };
-	if (typeof tokens.access_token !== "string" || typeof tokens.id_token !== "string") {
-		throw new Error("Access token response is missing required tokens.");
-	}
-	return { access_token: tokens.access_token, id_token: tokens.id_token };
-}
-
-async function verifyToken(env: Env, token: string) {
-	const jwksUrl = new URL(env.ACCESS_JWKS_URL);
+async function authenticateWithAccess(request: Request, env: Env, codeVerifier: string) {
 	// Access for SaaS places /jwks directly under its OIDC issuer URL.
-	const issuer = new URL(".", jwksUrl).href.replace(/\/$/, "");
-	const { payload } = await jwtVerify(token, createRemoteJWKSet(jwksUrl), {
-		algorithms: ["RS256"],
-		audience: env.ACCESS_CLIENT_ID,
-		issuer,
-		requiredClaims: ["exp", "iat", "sub"],
+	const server: oidc.AuthorizationServer = {
+		issuer: new URL(".", env.ACCESS_JWKS_URL).href.replace(/\/$/, ""),
+		token_endpoint: env.ACCESS_TOKEN_URL,
+		jwks_uri: env.ACCESS_JWKS_URL,
+	};
+	const client: oidc.Client = {
+		client_id: env.ACCESS_CLIENT_ID,
+		id_token_signed_response_alg: "RS256",
+		[oidc.clockTolerance]: 0,
+	};
+	// finishUpstream already verified and consumed the browser-bound state transaction.
+	const parameters = oidc.validateAuthResponse(server, client, new URL(request.url), oidc.skipStateCheck);
+	const signal = AbortSignal.timeout(20_000);
+	const response = await oidc.authorizationCodeGrantRequest(
+		server, client, oidc.ClientSecretPost(env.ACCESS_CLIENT_SECRET), parameters,
+		new URL("/callback", request.url).href, codeVerifier, { signal },
+	);
+	const tokens = await oidc.processAuthorizationCodeResponse(server, client, response, {
+		requireIdToken: true,
 	});
+	await oidc.validateApplicationLevelSignature(server, response, { signal });
+	const payload = oidc.getValidatedIdTokenClaims(tokens)!;
+	// Concierge accepts only its own audience, even when OIDC would allow additional audiences.
 	if (
 		typeof payload.sub !== "string" || !payload.sub ||
 		!Number.isFinite(payload.exp) || !Number.isFinite(payload.iat) ||
@@ -174,8 +160,11 @@ async function verifyToken(env: Env, token: string) {
 		throw new Error("Invalid Access identity claims.");
 	}
 	return {
-		sub: payload.sub,
-		name: typeof payload.name === "string" ? payload.name : payload.sub,
-		email: typeof payload.email === "string" ? payload.email : undefined,
+		tokens,
+		user: {
+			sub: payload.sub,
+			name: typeof payload.name === "string" ? payload.name : payload.sub,
+			email: typeof payload.email === "string" ? payload.email : undefined,
+		},
 	};
 }

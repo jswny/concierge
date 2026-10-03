@@ -57,7 +57,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		} });
 		assert.equal(result.isError, undefined);
 		assert.equal(result.structuredContent.result.sum, 4);
-		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["google.request", "notion.request"]);
+		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["google.request", "maps.request", "notion.request"]);
 	} finally {
 		await client.close();
 		await harness.close();

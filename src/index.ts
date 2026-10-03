@@ -13,6 +13,7 @@ import { handleAccessRequest } from "./access-handler";
 import { CloudflareConnector } from "./cloudflare-connector";
 import { GoogleWorkspaceAuth } from "./integrations/google/auth";
 import { GoogleConnector } from "./integrations/google/connector";
+import { MapsConnector } from "./integrations/maps/connector";
 import { NotionConnector } from "./notion-connector";
 import { ConnectorRequests } from "./connector-requests";
 
@@ -45,6 +46,7 @@ function createConciergeServer(
 			new CloudflareConnector(ctx, env, requests),
 			new NotionConnector(ctx, env, requests),
 			new GoogleConnector(ctx, env, googleAuth, requests),
+			new MapsConnector(ctx, env, requests),
 		],
 		ctx,
 		executor: new DynamicWorkerExecutor({ loader: env.LOADER }),
@@ -55,6 +57,8 @@ function createConciergeServer(
 			cloudflare: "Read rendered public webpages as Markdown with Cloudflare Browser Run.",
 			google:
 				"Call Google Workspace APIs as joe@j1.io through google.request. Gmail email and settings are enabled; consult official API documentation for request details.",
+			maps:
+				"Search public businesses and places, and read ratings, rating counts, hours, and details through maps.request using Places API (New). Consult official API documentation; pass field masks in query.fields. Requests may incur charges; select only needed fields and preserve Google Maps attribution.",
 			notion:
 				"Call the Notion REST API through notion.request with the server-side NOTION_TOKEN. Consult the current official Notion API documentation for request details.",
 		},

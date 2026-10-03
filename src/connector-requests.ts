@@ -319,6 +319,7 @@ export class ConnectorRequests {
 		const secrets = [
 			headers.get("Authorization")?.replace(/^\S+\s+/, ""),
 			headers.get("X-API-Key"),
+			headers.get("X-Goog-Api-Key"),
 		].filter((value): value is string => !!value);
 		const message =
 			category === "authentication" || category === "permission" || options.sensitive

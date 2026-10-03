@@ -28,6 +28,7 @@ const TEST_SECRETS = {
 	COOKIE_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000",
 	NOTION_TOKEN: "test-notion-token",
 	GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify(GOOGLE_CREDENTIALS),
+	GOOGLE_MAPS_API_KEY: "test-maps-api-key",
 };
 
 const debugServer = createConciergeHarness(true);
@@ -703,6 +704,120 @@ test("rejects invalid Notion and Google request arguments before outbound calls"
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
+});
+
+test("calls Maps with native query/body, server-owned credentials, and unchanged JSON", async () => {
+	const originalFetch = globalThis.fetch;
+	const requests = [];
+	const payload = { places: [{ id: "test-place", displayName: { text: "Test cafe" }, rating: 4.8, userRatingCount: 120,
+		attributions: [{ provider: "Google Maps" }], reviews: [{ authorAttribution: { displayName: "Test reviewer" } }] }] };
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		if (new URL(request.url).hostname !== "places.googleapis.com") return originalFetch(input, init);
+		requests.push(request);
+		return Response.json(payload);
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			const tools = await client.listTools();
+			assert.match(tools.tools[0].description, /maps\.request/);
+			const docs = await client.callTool({ name: "code", arguments: {
+				code: "async () => ({ search: await codemode.search('business ratings'), docs: await codemode.describe('maps.request') })",
+			} });
+			assert.ok(docs.structuredContent.result.search.results.some((match) => match.path === "maps.request"));
+			assert.match(docs.structuredContent.result.docs.types, /places/);
+			for (const options of [
+				{ service: "places", method: "POST", path: "/v1/places:searchText", query: { fields: "places.id,places.rating,places.userRatingCount" }, body: { textQuery: "coffee shops in Brooklyn", pageSize: 1 } },
+				{ service: "places", method: "GET", path: "/v1/places/test-place", query: { "$fields": "id,rating,userRatingCount", languageCode: "en" } },
+				{ service: "places", method: "GET", path: "/v1/places/test-place/photos/photo/media", query: { skipHttpRedirect: true, maxWidthPx: 100 } },
+			]) {
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await maps.request(${JSON.stringify(options)})` } });
+				assert.equal(result.isError, undefined);
+				assert.deepEqual(result.structuredContent.result, payload);
+				const request = requests.at(-1);
+				const expected = new URL(options.path, "https://places.googleapis.com");
+				expected.search = new URLSearchParams(options.query).toString();
+				assert.equal(request.url, expected.href);
+				assert.equal(request.method, options.method);
+				assert.equal(request.headers.get("X-Goog-Api-Key"), TEST_SECRETS.GOOGLE_MAPS_API_KEY);
+				assert.equal(request.headers.has("Authorization"), false);
+				if (options.body) assert.deepEqual(await request.json(), options.body);
+			}
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("rejects Maps credential overrides, invalid inputs, and endpoint escapes before dispatch", async () => {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		if (new URL(request.url).hostname !== "places.googleapis.com") return originalFetch(input, init);
+		calls++;
+		return Response.json({});
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			const base = { service: "places", method: "GET", path: "/v1/places/test-place" };
+			for (const override of [
+				{ service: "gmail" }, { method: "DELETE" }, { body: {} }, { fields: ["rating"] },
+				{ headers: { "X-Goog-Api-Key": "caller-key" } }, { query: { key: "caller-key" } },
+				{ query: { access_token: "caller-token" } }, { query: { nested: {} } },
+				{ path: "https://evil.example/v1/places/test-place" }, { path: "/v1/../token" },
+				{ path: "/v1/%2e%2e/token" }, { path: "/v1/places/test-place?key=caller-key" },
+			]) {
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await maps.request(${JSON.stringify({ ...base, ...override })})` } });
+				assert.equal(result.isError, true, JSON.stringify(override));
+			}
+		});
+		assert.equal(calls, 0);
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("Maps retries known read-only POSTs, never assumes arbitrary POSTs are safe, and redacts API keys", async () => {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	let status = 503;
+	let recover = true;
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		if (new URL(request.url).hostname !== "places.googleapis.com") return originalFetch(input, init);
+		calls++;
+		if (recover && calls > 1) return Response.json({ places: [] });
+		return Response.json({ error: { status: "UNAVAILABLE", message: `Rejected ${TEST_SECRETS.GOOGLE_MAPS_API_KEY}` } }, { status });
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			const invoke = (path) => client.callTool({ name: "code", arguments: { code: `async () => await maps.request({ service: 'places', method: 'POST', path: '${path}', query: { fields: 'places.id' }, body: {} })` } });
+			assert.equal((await invoke("/v1/places:searchText")).isError, undefined);
+			assert.equal(calls, 2);
+			calls = 0;
+			const unknown = await invoke("/v1/places:futureOperation");
+			assert.equal(unknown.isError, true);
+			assert.equal(calls, 1);
+			assert.match(unknown.content[0].text, /safe_to_replay=false/);
+			assert.doesNotMatch(JSON.stringify(unknown), /test-maps-api-key/);
+			calls = 0; status = 403; recover = false;
+			const denied = await invoke("/v1/places:searchText");
+			assert.equal(denied.isError, true);
+			assert.equal(calls, 1);
+			assert.doesNotMatch(JSON.stringify(denied), /test-maps-api-key|Rejected/);
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("Maps fails clearly when its API key is missing", async () => {
+	const harness = createConciergeHarness(true, { GOOGLE_MAPS_API_KEY: "" });
+	try {
+		await harness.listen();
+		await withMcpClient(undefined, async (client) => {
+			const result = await client.callTool({ name: "code", arguments: {
+				code: "async () => await maps.request({ service: 'places', method: 'GET', path: '/v1/places/test-place', query: { fields: 'id' } })",
+			} });
+			assert.equal(result.isError, true);
+			assert.match(result.content[0].text, /GOOGLE_MAPS_API_KEY is not configured/);
+		}, harness);
+	} finally { await harness.close(); }
 });
 
 test("calls Google Workspace through signed JWTs, fixed delegation, and a private token cache", async (t) => {

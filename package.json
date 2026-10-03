@@ -2,13 +2,16 @@
   "name": "concierge",
   "version": "0.0.1",
   "private": true,
+  "type": "module",
   "scripts": {
-    "build": "npm run type-check && npm test",
-    "deploy": "wrangler deploy",
-    "dev": "wrangler dev --var CONCIERGE_DEBUG:true",
-    "start": "wrangler dev --var CONCIERGE_DEBUG:true",
+    "build": "npm run type-check && npm test && vite build && npm run test:build",
+    "deploy": "npm run build && wrangler deploy --config dist/concierge/wrangler.json",
+    "dev": "vite",
+    "start": "npm run dev",
+    "preview": "vite preview",
     "test": "node --test tests/worker.test.mjs",
-    "cf-typegen": "wrangler types",
+    "test:build": "node --test tests/build.test.mjs",
+    "cf-typegen": "wrangler types --config wrangler.jsonc",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
@@ -23,8 +26,10 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "1.62.5",
     "@types/node": "^26.1.1",
     "typescript": "7.0.2",
-    "wrangler": "4.146.0"
+    "vite": "8.3.2",
+    "wrangler": "4.147.0"
   }
 }

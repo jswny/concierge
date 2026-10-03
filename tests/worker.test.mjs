@@ -12,6 +12,7 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const MODERN_PROTOCOL_VERSION = "2026-07-28";
 const LEGACY_PROTOCOL_VERSION = "2025-11-25";
 const GOOGLE_KEYS = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const ACCESS_ISSUER = "https://access.example/cdn-cgi/access/sso/oidc/test-access-client";
 const GOOGLE_CREDENTIALS = {
 	type: "service_account",
 	client_email: "concierge@j1-concierge.iam.gserviceaccount.com",
@@ -19,11 +20,11 @@ const GOOGLE_CREDENTIALS = {
 	private_key: GOOGLE_KEYS.privateKey.export({ type: "pkcs8", format: "pem" }),
 };
 const TEST_SECRETS = {
-	ACCESS_AUTHORIZATION_URL: "https://access.example/authorize",
+	ACCESS_AUTHORIZATION_URL: `${ACCESS_ISSUER}/authorization`,
 	ACCESS_CLIENT_ID: "test-access-client",
 	ACCESS_CLIENT_SECRET: "test-access-secret",
-	ACCESS_JWKS_URL: "https://access.example/jwks",
-	ACCESS_TOKEN_URL: "https://access.example/token",
+	ACCESS_JWKS_URL: `${ACCESS_ISSUER}/jwks`,
+	ACCESS_TOKEN_URL: `${ACCESS_ISSUER}/token`,
 	COOKIE_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000",
 	NOTION_TOKEN: "test-notion-token",
 	GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify(GOOGLE_CREDENTIALS),
@@ -88,8 +89,11 @@ test("authorizes a CIMD client through Access and refreshes its MCP token", asyn
 	const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 	const header = Buffer.from(JSON.stringify({ alg: "RS256", kid: "test-key" })).toString("base64url");
 	const claims = Buffer.from(JSON.stringify({
+		aud: TEST_SECRETS.ACCESS_CLIENT_ID,
 		email: "test@example.com",
 		exp: Math.floor(Date.now() / 1000) + 300,
+		iat: Math.floor(Date.now() / 1000),
+		iss: ACCESS_ISSUER,
 		name: "Test User",
 		sub: "test-user",
 	})).toString("base64url");
@@ -245,6 +249,108 @@ test("authorizes a CIMD client through Access and refreshes its MCP token", asyn
 			assert.deepEqual(tools.map((tool) => tool.name), ["code"]);
 		} finally {
 			await client.close();
+		}
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("validates Access ID tokens before issuing MCP authorization codes", async (t) => {
+	const clientId = "https://identity-client.example/metadata.json";
+	const redirectUri = "https://identity-client.example/callback";
+	const worker = productionServer.getWorker("concierge");
+	const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+	const wrongKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey;
+	const now = Math.floor(Date.now() / 1000);
+	const validClaims = {
+		iss: ACCESS_ISSUER, aud: TEST_SECRETS.ACCESS_CLIENT_ID,
+		sub: "test-user", iat: now, exp: now + 300,
+		email: "do-not-expose@example.com",
+	};
+	const cases = [
+		{ name: "accepts a valid ID token", claims: {}, accepted: true },
+		{ name: "accepts the sole trusted audience in an array with matching azp", claims: { aud: [TEST_SECRETS.ACCESS_CLIENT_ID], azp: TEST_SECRETS.ACCESS_CLIENT_ID }, accepted: true },
+		{ name: "rejects the wrong issuer", claims: { iss: "https://other.example" } },
+		{ name: "rejects a missing issuer", claims: { iss: undefined } },
+		{ name: "rejects the wrong audience", claims: { aud: "another-access-client" } },
+		{ name: "rejects a missing audience", claims: { aud: undefined } },
+		{ name: "rejects untrusted additional audiences", claims: { aud: [TEST_SECRETS.ACCESS_CLIENT_ID, "another-access-client"] } },
+		{ name: "rejects the wrong authorized party", claims: { azp: "another-access-client" } },
+		{ name: "rejects a missing expiry", claims: { exp: undefined } },
+		{ name: "rejects a string expiry", claims: { exp: String(now + 300) } },
+		{ name: "rejects a null expiry", claims: { exp: null } },
+		{ name: "rejects an expired token", claims: { exp: now - 1 } },
+		{ name: "rejects expiry at the current time", claims: { exp: now } },
+		{ name: "rejects a missing issue time", claims: { iat: undefined } },
+		{ name: "rejects a string issue time", claims: { iat: String(now) } },
+		{ name: "rejects a missing subject", claims: { sub: undefined } },
+		{ name: "rejects an empty subject", claims: { sub: "" } },
+		{ name: "rejects a non-string subject", claims: { sub: 123 } },
+		{ name: "rejects a future not-before time", claims: { nbf: now + 300 } },
+		{ name: "rejects an invalid signature", claims: {}, key: wrongKey },
+		{ name: "rejects an unknown signing key", claims: {}, header: { kid: "unknown-key" } },
+		{ name: "rejects an unexpected signing algorithm", claims: {}, header: { alg: "RS384" } },
+		{ name: "rejects an unsigned token", claims: {}, unsigned: true },
+		{ name: "rejects a malformed token", token: "do-not-expose-token" },
+	];
+	let idToken;
+	let exchangeCount = 0;
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		if (request.url === clientId) {
+			return Response.json({ client_id: clientId, client_name: "Identity Test Client", redirect_uris: [redirectUri], response_types: ["code"], token_endpoint_auth_method: "none" });
+		}
+		if (request.url === TEST_SECRETS.ACCESS_TOKEN_URL) {
+			exchangeCount++;
+			return Response.json({ access_token: "do-not-expose-upstream-token", id_token: idToken });
+		}
+		if (request.url === TEST_SECRETS.ACCESS_JWKS_URL) {
+			return Response.json({ keys: [{ ...publicKey.export({ format: "jwk" }), kid: "identity-test-key", alg: "RS256", use: "sig" }] });
+		}
+		return originalFetch(input, init);
+	};
+	try {
+		for (const example of cases) {
+			await t.test(example.name, async () => {
+				const header = { alg: "RS256", kid: "identity-test-key", ...example.header };
+				if (example.unsigned) header.alg = "none";
+				const data = [header, { ...validClaims, ...example.claims }]
+					.map((part) => Buffer.from(JSON.stringify(part)).toString("base64url")).join(".");
+				const signature = example.unsigned ? "" : sign(header.alg === "RS384" ? "RSA-SHA384" : "RSA-SHA256", Buffer.from(data), example.key ?? privateKey).toString("base64url");
+				idToken = example.token ?? `${data}.${signature}`;
+				const authorizeUrl = new URL("https://concierge.j1.io/authorize");
+				authorizeUrl.search = new URLSearchParams({
+					client_id: clientId, redirect_uri: redirectUri, response_type: "code",
+					resource: "https://concierge.j1.io/mcp", state: example.name,
+					code_challenge: createHash("sha256").update(randomBytes(32)).digest("base64url"),
+					code_challenge_method: "S256",
+				}).toString();
+				const consent = await worker.fetch(authorizeUrl);
+				assert.equal(consent.status, 200, consent.status === 200 ? undefined : await consent.text());
+				const approval = await worker.fetch("https://concierge.j1.io/authorize", {
+					method: "POST", redirect: "manual", headers: { Cookie: responseCookies(consent) },
+					body: consentForm(await consent.text(), "approve"),
+				});
+				assert.equal(approval.status, 302);
+				const callbackUrl = new URL("https://concierge.j1.io/callback");
+				callbackUrl.search = new URLSearchParams({ code: "test-access-code", state: new URL(approval.headers.get("Location")).searchParams.get("state") }).toString();
+				const callbackOptions = { redirect: "manual", headers: { Cookie: responseCookies(approval) } };
+				const result = await worker.fetch(callbackUrl, callbackOptions);
+				if (example.accepted) {
+					assert.equal(result.status, 302);
+					const destination = new URL(result.headers.get("Location"));
+					assert.equal(destination.origin + destination.pathname, redirectUri);
+					assert.ok(destination.searchParams.get("code"));
+				} else {
+					assert.equal(result.status, 400);
+					assert.equal(result.headers.get("Location"), null);
+					assert.equal(await result.text(), "Access identity could not be verified.");
+					const count = exchangeCount;
+					assert.equal((await worker.fetch(callbackUrl, callbackOptions)).status, 400);
+					assert.equal(exchangeCount, count, "Rejected identity transactions must not be replayable");
+				}
+			});
 		}
 	} finally {
 		globalThis.fetch = originalFetch;

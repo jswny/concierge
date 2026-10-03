@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import {
 	AuthorizationError,
 	authorizationErrorRedirect,
@@ -73,7 +74,12 @@ async function handleAccessRoute(request: Request, env: EnvWithOauth) {
 		}
 
 		const tokens = await exchangeAccessCode(request, env, code, resumed.data.codeVerifier);
-		const user = await verifyToken(env, tokens.id_token);
+		let user;
+		try {
+			user = await verifyToken(env, tokens.id_token);
+		} catch {
+			return new Response("Access identity could not be verified.", { status: 400, headers: resumed.headers });
+		}
 		const { redirectTo } = await oauth.completeAuthorization({
 			metadata: { label: user.name },
 			props: {
@@ -149,50 +155,27 @@ async function exchangeAccessCode(request: Request, env: Env, code: string, code
 	return { access_token: tokens.access_token, id_token: tokens.id_token };
 }
 
-async function fetchAccessPublicKey(env: Env, kid: string) {
-	if (!env.ACCESS_JWKS_URL) {
-		throw new Error("access jwks url not provided");
-	}
-	// TODO: cache this
-	const resp = await fetch(env.ACCESS_JWKS_URL);
-	const keys = (await resp.json()) as { keys: (JsonWebKey & { kid: string })[] };
-	const jwk = keys.keys.filter((key) => key.kid === kid)[0];
-	return crypto.subtle.importKey(
-		"jwk",
-		jwk,
-		{ hash: "SHA-256", name: "RSASSA-PKCS1-v1_5" },
-		false,
-		["verify"],
-	);
-}
-
-function parseJWT(token: string) {
-	const tokenParts = token.split(".");
-	if (tokenParts.length !== 3) {
-		throw new Error("token must have 3 parts");
+async function verifyToken(env: Env, token: string) {
+	const jwksUrl = new URL(env.ACCESS_JWKS_URL);
+	// Access for SaaS places /jwks directly under its OIDC issuer URL.
+	const issuer = new URL(".", jwksUrl).href.replace(/\/$/, "");
+	const { payload } = await jwtVerify(token, createRemoteJWKSet(jwksUrl), {
+		algorithms: ["RS256"],
+		audience: env.ACCESS_CLIENT_ID,
+		issuer,
+		requiredClaims: ["exp", "iat", "sub"],
+	});
+	if (
+		typeof payload.sub !== "string" || !payload.sub ||
+		!Number.isFinite(payload.exp) || !Number.isFinite(payload.iat) ||
+		(Array.isArray(payload.aud) && payload.aud.some((audience) => audience !== env.ACCESS_CLIENT_ID)) ||
+		(payload.azp !== undefined && payload.azp !== env.ACCESS_CLIENT_ID)
+	) {
+		throw new Error("Invalid Access identity claims.");
 	}
 	return {
-		data: `${tokenParts[0]}.${tokenParts[1]}`,
-		header: JSON.parse(Buffer.from(tokenParts[0], "base64url").toString()),
-		payload: JSON.parse(Buffer.from(tokenParts[1], "base64url").toString()),
-		signature: tokenParts[2],
+		sub: payload.sub,
+		name: typeof payload.name === "string" ? payload.name : payload.sub,
+		email: typeof payload.email === "string" ? payload.email : undefined,
 	};
-}
-
-async function verifyToken(env: Env, token: string) {
-	const jwt = parseJWT(token);
-	const key = await fetchAccessPublicKey(env, jwt.header.kid);
-	const verified = await crypto.subtle.verify(
-		"RSASSA-PKCS1-v1_5",
-		key,
-		Buffer.from(jwt.signature, "base64url"),
-		Buffer.from(jwt.data),
-	);
-	if (!verified) {
-		throw new Error("failed to verify token");
-	}
-	if (jwt.payload.exp < Math.floor(Date.now() / 1000)) {
-		throw new Error("expired token");
-	}
-	return jwt.payload;
 }

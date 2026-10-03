@@ -1,10 +1,11 @@
 import { CodemodeConnector, type ConnectorTools } from "@cloudflare/codemode";
 import { ConnectorRequests, createApiUrl, isRecord, type ApiFailure } from "./connector-requests";
-import { readApiRequestArgs } from "./connector-inputs";
+import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "./connector-inputs";
 
 const NOTION_API_BASE = "https://api.notion.com";
 const NOTION_VERSION = "2026-03-11";
-const NOTION_METHODS = ["GET", "POST", "PATCH", "DELETE"];
+const requestSchema = apiRequestSchema({ methods: ["GET", "POST", "PATCH", "DELETE"], pathPrefix: "/v1/" });
+const requestInputSchema = toToolInputSchema(requestSchema);
 
 export class NotionConnector extends CodemodeConnector<Env> {
 	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests) {
@@ -28,35 +29,9 @@ export class NotionConnector extends CodemodeConnector<Env> {
 			request: {
 				description:
 					"Send an authenticated request to the Notion REST API. Consult the current official Notion API documentation for the endpoint's method, relative /v1 path, query parameters, and JSON body.",
-				inputSchema: {
-					type: "object",
-					properties: {
-						method: {
-							description: "Notion API HTTP method.",
-							enum: [...NOTION_METHODS],
-							type: "string",
-						},
-						path: {
-							description: "Relative Notion API path beginning with /v1/.",
-							pattern: "^/v1/",
-							type: "string",
-						},
-						query: {
-							description: "Optional scalar query parameters.",
-							type: "object",
-							additionalProperties: {
-								type: ["boolean", "number", "string"],
-							},
-						},
-						body: {
-							description: "Optional JSON request body documented for the endpoint.",
-						},
-					},
-					required: ["method", "path"],
-					additionalProperties: false,
-				},
+				inputSchema: requestInputSchema,
 				execute: async (args) => {
-					const options = readApiRequestArgs(args, { methods: NOTION_METHODS, pathPrefix: "/v1/" });
+					const options = parseApiRequest(requestSchema, args);
 					if (!this.env.NOTION_TOKEN) throw new Error("NOTION_TOKEN is not configured.");
 					return this.requests.request({
 						connector: "Notion",

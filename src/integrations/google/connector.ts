@@ -1,7 +1,8 @@
 import { CodemodeConnector, type ConnectorTools } from "@cloudflare/codemode";
+import { z } from "zod";
 import { GoogleWorkspaceAuth } from "./auth";
 import { ConnectorRequests, createApiUrl, isRecord, type ApiFailure } from "../../connector-requests";
-import { readApiRequestArgs, type ApiRequestArgs } from "../../connector-inputs";
+import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../connector-inputs";
 
 const SERVICES = {
 	gmail: {
@@ -14,10 +15,16 @@ const SERVICES = {
 		],
 	},
 } as const;
-const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"];
-type GoogleRequest = ApiRequestArgs & {
-	service: keyof typeof SERVICES;
-};
+const requestSchema = apiRequestSchema({
+	methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+	pathPrefix: SERVICES.gmail.pathPrefix,
+	queryArrays: true,
+}).extend({
+	service: z.enum(Object.keys(SERVICES) as Array<keyof typeof SERVICES>).describe("Enabled Google Workspace API."),
+	body: z.unknown().optional().describe("Optional JSON request body. MIME messages use the Gmail API's base64url raw field."),
+});
+const requestInputSchema = toToolInputSchema(requestSchema);
+type GoogleRequest = z.infer<typeof requestSchema>;
 
 export class GoogleConnector extends CodemodeConnector<Env> {
 	constructor(ctx: DurableObjectState, env: Env, private readonly auth: GoogleWorkspaceAuth, private readonly requests: ConnectorRequests) {
@@ -42,28 +49,8 @@ export class GoogleConnector extends CodemodeConnector<Env> {
 			request: {
 				description:
 					"Call a Google Workspace REST API as joe@j1.io. Gmail is enabled for reading, sending, creating, updating, deleting email and managing settings. Consult official API documentation; use relative /gmail/v1/users/me/ paths. Returns the API JSON response, or null for an empty response.",
-				inputSchema: {
-					type: "object",
-					properties: {
-						service: { type: "string", enum: Object.keys(SERVICES), description: "Enabled Google Workspace API." },
-						method: { type: "string", enum: METHODS, description: "API HTTP method." },
-						path: { type: "string", pattern: "^/gmail/v1/users/me/", description: "Relative API path, e.g. /gmail/v1/users/me/profile. Put query parameters in query." },
-						query: {
-							type: "object",
-							description: "Optional query parameters. Arrays produce repeated parameters.",
-							additionalProperties: {
-								anyOf: [
-									{ type: ["boolean", "number", "string"] },
-									{ type: "array", items: { type: ["boolean", "number", "string"] } },
-								],
-							},
-						},
-						body: { description: "Optional JSON request body. MIME messages use the Gmail API's base64url raw field." },
-					},
-					required: ["service", "method", "path"],
-					additionalProperties: false,
-				},
-				execute: async (args) => this.request(readRequest(args)),
+				inputSchema: requestInputSchema,
+				execute: async (args) => this.request(parseApiRequest(requestSchema, args)),
 			},
 		};
 	}
@@ -85,23 +72,6 @@ export class GoogleConnector extends CodemodeConnector<Env> {
 			classifyError: classifyGoogleError,
 		});
 	}
-}
-
-function readRequest(args: unknown): GoogleRequest {
-	const service = isRecord(args) ? args.service : undefined;
-	if (typeof service !== "string" || !Object.prototype.hasOwnProperty.call(SERVICES, service)) {
-		throw new Error(`Expected Google service to be one of: ${Object.keys(SERVICES).join(", ")}.`);
-	}
-	const selectedService = service as keyof typeof SERVICES;
-	return {
-		...readApiRequestArgs(args, {
-			methods: METHODS,
-			pathPrefix: SERVICES[selectedService].pathPrefix,
-			queryArrays: true,
-			extraKeys: ["service"],
-		}),
-		service: selectedService,
-	};
 }
 
 function classifyGoogleError(status: number, payload: unknown): ApiFailure {

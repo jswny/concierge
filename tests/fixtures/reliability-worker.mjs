@@ -4,7 +4,8 @@ import {
 	createApiUrl,
 	parseRetryAfter,
 } from "../../src/connector-requests.ts";
-import { readApiRequestArgs } from "../../src/connector-inputs.ts";
+import { z } from "zod";
+import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../src/connector-inputs.ts";
 
 export default {
 	async fetch(request) {
@@ -23,8 +24,12 @@ export default {
 		let failuresRemaining = options.failuresBeforeSuccess ?? Infinity;
 		const dispatchTimes = [];
 		try {
-			if (options.action === "inputs")
-				return Response.json({ result: readApiRequestArgs(options.args, options.contract) });
+			if (options.action === "inputs") {
+				const base = apiRequestSchema(options.contract);
+				const schema = options.contract.extraKeys?.includes("service")
+					? base.extend({ service: z.enum(["gmail"]) }) : base;
+				return Response.json({ result: parseApiRequest(schema, options.args), inputSchema: toToolInputSchema(schema) });
+			}
 			if (options.action === "retry-after")
 				return Response.json(options.values.map((value) => parseRetryAfter(value, 0) ?? null));
 			if (options.action === "url")

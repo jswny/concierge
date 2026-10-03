@@ -577,6 +577,24 @@ test("calls Browser Run through the Cloudflare connector", async () => {
 	});
 });
 
+test("exposes generated connector contracts and validates browser inputs", async () => {
+	await withMcpClient(undefined, async (client) => {
+		const docs = await client.callTool({ name: "code", arguments: {
+			code: "async () => ({ notion: await codemode.describe('notion.request'), google: await codemode.describe('google.request'), browser: await codemode.describe('cloudflare.read_webpage_as_markdown') })",
+		} });
+		assert.equal(docs.isError, undefined);
+		assert.match(JSON.stringify(docs.structuredContent.result.notion), /GET.*POST.*PATCH.*DELETE/s);
+		assert.match(JSON.stringify(docs.structuredContent.result.google), /gmail/);
+		assert.match(JSON.stringify(docs.structuredContent.result.browser), /url/);
+		for (const args of [null, {}, { url: "" }, { url: "not-a-url" }, { url: "ftp://example.com" }, { url: "https://user:password@example.com" }, { url: "https://example.com", extra: true }]) {
+			const result = await client.callTool({ name: "code", arguments: {
+				code: `async () => await cloudflare.read_webpage_as_markdown(${JSON.stringify(args)})`,
+			} });
+			assert.equal(result.isError, true, JSON.stringify(args));
+		}
+	});
+});
+
 test("calls Notion with the configured API contract", async () => {
 	const originalFetch = globalThis.fetch;
 	let notionRequest;
@@ -814,7 +832,15 @@ test("shares bounded reliability behavior across connector operations", async (t
 	await t.test("shares request validation without widening provider contracts", async () => {
 		const contract = { methods: ["GET", "POST"], pathPrefix: "/api/" };
 		const args = { method: "GET", path: "/api/items", query: { flag: true, count: 2, name: "test" } };
-		assert.deepEqual((await run({ action: "inputs", contract, args })).result, args);
+		const parsed = await run({ action: "inputs", contract, args });
+		assert.deepEqual(parsed.result, args);
+		assert.equal(parsed.inputSchema.$schema, "http://json-schema.org/draft-07/schema#");
+		assert.equal(parsed.inputSchema.additionalProperties, false);
+		assert.deepEqual(parsed.inputSchema.required, ["method", "path"]);
+		assert.deepEqual(parsed.inputSchema.properties.method.enum, contract.methods);
+		assert.ok(new RegExp(parsed.inputSchema.properties.path.pattern).test(args.path));
+		assert.ok(!new RegExp(parsed.inputSchema.properties.path.pattern).test("/outside"));
+		assert.equal(parsed.inputSchema.properties.query.additionalProperties.anyOf.some((entry) => entry.type === "array"), false);
 		const write = { ...args, method: "POST", body: { name: "test" } };
 		assert.deepEqual((await run({ action: "inputs", contract, args: write })).result, write);
 		for (const invalid of [null, [], "request", { ...args, extra: true }, { ...args, method: "PUT" }, { ...args, method: 1 }, { ...args, path: "/outside" }, { ...args, path: null }, { ...args, query: null }, { ...args, query: [] }, { ...args, query: { nested: {} } }, { ...args, query: { values: ["one"] } }, { ...args, body: null }]) {
@@ -822,7 +848,10 @@ test("shares bounded reliability behavior across connector operations", async (t
 		}
 		const googleContract = { ...contract, queryArrays: true, extraKeys: ["service"] };
 		const googleArgs = { ...args, service: "gmail", query: { values: ["one", 2, true] } };
-		assert.deepEqual((await run({ action: "inputs", contract: googleContract, args: googleArgs })).result, { method: googleArgs.method, path: googleArgs.path, query: googleArgs.query });
+		assert.deepEqual((await run({ action: "inputs", contract: googleContract, args: googleArgs })).result, googleArgs);
+		const googleSchema = (await run({ action: "inputs", contract: googleContract, args: googleArgs })).inputSchema;
+		assert.ok(googleSchema.required.includes("service"));
+		assert.ok(googleSchema.properties.query.additionalProperties.anyOf.some((entry) => entry.type === "array"));
 		assert.ok((await run({ action: "inputs", contract: googleContract, args: { ...googleArgs, query: { nested: [["one"]] } } })).error);
 	});
 	await t.test("parses Retry-After seconds and HTTP dates, rejecting malformed values", async () => {

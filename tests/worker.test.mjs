@@ -747,12 +747,56 @@ test("calls Maps with native query/body, server-owned credentials, and unchanged
 	} finally { globalThis.fetch = originalFetch; }
 });
 
+test("calls Routes and route matrices with native bodies, masks, and unchanged per-element outcomes", async () => {
+	const originalFetch = globalThis.fetch;
+	const requests = [];
+	const routes = { routes: [{ distanceMeters: 1200, duration: "600s", polyline: { encodedPolyline: "test-polyline" } }] };
+	const matrix = [
+		{ originIndex: 0, destinationIndex: 0, status: {}, condition: "ROUTE_EXISTS", distanceMeters: 1200, duration: "600s" },
+		{ originIndex: 0, destinationIndex: 1, status: { code: 5, message: "No route found" }, condition: "ROUTE_NOT_FOUND" },
+	];
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		if (new URL(request.url).hostname !== "routes.googleapis.com") return originalFetch(input, init);
+		requests.push(request);
+		return Response.json(new URL(request.url).pathname === "/directions/v2:computeRoutes" ? routes : matrix);
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			const docs = await client.callTool({ name: "code", arguments: {
+				code: "async () => ({ search: await codemode.search('travel time'), docs: await codemode.describe('maps.request') })",
+			} });
+			assert.ok(docs.structuredContent.result.search.results.some((match) => match.path === "maps.request"));
+			assert.match(docs.structuredContent.result.docs.types, /routes/);
+			assert.match(docs.structuredContent.result.docs.types, /computeRouteMatrix/);
+			const origin = { location: { latLng: { latitude: 40.7484, longitude: -73.9857 } } };
+			const destination = { address: "Grand Central Terminal, New York" };
+			for (const [options, payload] of [
+				[{ service: "routes", method: "POST", path: "/directions/v2:computeRoutes", query: { fields: "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline" }, body: { origin, destination, travelMode: "WALK" } }, routes],
+				[{ service: "routes", method: "POST", path: "/distanceMatrix/v2:computeRouteMatrix", query: { "$fields": "originIndex,destinationIndex,status,condition,distanceMeters,duration" }, body: { origins: [{ waypoint: origin }], destinations: [{ waypoint: destination }, { waypoint: { address: "Test destination" } }], travelMode: "DRIVE" } }, matrix],
+			]) {
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await maps.request(${JSON.stringify(options)})` } });
+				assert.equal(result.isError, undefined);
+				assert.deepEqual(result.structuredContent.result, payload);
+				const request = requests.at(-1);
+				const expected = new URL(options.path, "https://routes.googleapis.com");
+				expected.search = new URLSearchParams(options.query).toString();
+				assert.equal(request.url, expected.href);
+				assert.equal(request.method, "POST");
+				assert.equal(request.headers.get("X-Goog-Api-Key"), TEST_SECRETS.GOOGLE_MAPS_API_KEY);
+				assert.equal(request.headers.has("Authorization"), false);
+				assert.deepEqual(await request.json(), options.body);
+			}
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
 test("rejects Maps credential overrides, invalid inputs, and endpoint escapes before dispatch", async () => {
 	const originalFetch = globalThis.fetch;
 	let calls = 0;
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
-		if (new URL(request.url).hostname !== "places.googleapis.com") return originalFetch(input, init);
+		if (!["places.googleapis.com", "routes.googleapis.com"].includes(new URL(request.url).hostname)) return originalFetch(input, init);
 		calls++;
 		return Response.json({});
 	};
@@ -767,6 +811,17 @@ test("rejects Maps credential overrides, invalid inputs, and endpoint escapes be
 				{ path: "/v1/%2e%2e/token" }, { path: "/v1/places/test-place?key=caller-key" },
 			]) {
 				const result = await client.callTool({ name: "code", arguments: { code: `async () => await maps.request(${JSON.stringify({ ...base, ...override })})` } });
+				assert.equal(result.isError, true, JSON.stringify(override));
+			}
+			const route = { service: "routes", method: "POST", path: "/directions/v2:computeRoutes", body: {} };
+			for (const override of [
+				{ method: "GET" }, { method: "DELETE" }, { service: "places" },
+				{ path: "/v1/places:searchText" }, { path: "/directions/v2:futureOperation" },
+				{ path: "https://evil.example/directions/v2:computeRoutes" },
+				{ path: "/directions/v2:computeRoutes?key=caller-key" },
+				{ headers: { "X-Goog-Api-Key": "caller-key" } }, { query: { key: "caller-key" } },
+			]) {
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await maps.request(${JSON.stringify({ ...route, ...override })})` } });
 				assert.equal(result.isError, true, JSON.stringify(override));
 			}
 		});
@@ -802,6 +857,34 @@ test("Maps retries known read-only POSTs, never assumes arbitrary POSTs are safe
 			assert.equal(denied.isError, true);
 			assert.equal(calls, 1);
 			assert.doesNotMatch(JSON.stringify(denied), /test-maps-api-key|Rejected/);
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("Routes retries both read-only POST endpoints and redacts denied requests", async () => {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	let denied = false;
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		if (new URL(request.url).hostname !== "routes.googleapis.com") return originalFetch(input, init);
+		calls++;
+		if (!denied && calls > 1) return Response.json({});
+		return Response.json({ error: { status: denied ? "PERMISSION_DENIED" : "UNAVAILABLE", message: `Rejected ${TEST_SECRETS.GOOGLE_MAPS_API_KEY}` } }, { status: denied ? 403 : 503 });
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			for (const path of ["/directions/v2:computeRoutes", "/distanceMatrix/v2:computeRouteMatrix"]) {
+				calls = 0;
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await maps.request({ service: 'routes', method: 'POST', path: '${path}', query: { fields: 'status' }, body: {} })` } });
+				assert.equal(result.isError, undefined);
+				assert.equal(calls, 2);
+			}
+			calls = 0; denied = true;
+			const result = await client.callTool({ name: "code", arguments: { code: "async () => await maps.request({ service: 'routes', method: 'POST', path: '/directions/v2:computeRoutes', body: {} })" } });
+			assert.equal(result.isError, true);
+			assert.equal(calls, 1);
+			assert.doesNotMatch(JSON.stringify(result), /test-maps-api-key|Rejected/);
 		});
 	} finally { globalThis.fetch = originalFetch; }
 });

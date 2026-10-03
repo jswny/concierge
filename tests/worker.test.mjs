@@ -614,6 +614,41 @@ test("calls Notion with the configured API contract", async () => {
 	}
 });
 
+test("rejects invalid Notion and Google request arguments before outbound calls", async () => {
+	const originalFetch = globalThis.fetch;
+	let outboundCalls = 0;
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		if (["api.notion.com", "gmail.googleapis.com", "oauth2.googleapis.com"].includes(new URL(request.url).hostname)) {
+			outboundCalls++;
+			return Response.json({});
+		}
+		return originalFetch(input, init);
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			for (const [connector, base] of [
+				["notion", { method: "GET", path: "/v1/users/me" }],
+				["google", { service: "gmail", method: "GET", path: "/gmail/v1/users/me/profile" }],
+			]) {
+				for (const fields of ["query: { value: NaN }", "query: { value: Infinity }", "query: { value: {} }", "body: {}", "extra: true", "method: 'TRACE'"]) {
+					const result = await client.callTool({ name: "code", arguments: {
+						code: `async () => await ${connector}.request({ ...${JSON.stringify(base)}, ${fields} })`,
+					} });
+					assert.equal(result.isError, true, `${connector}: ${fields}`);
+				}
+			}
+			const result = await client.callTool({ name: "code", arguments: {
+				code: "async () => await notion.request({ method: 'GET', path: '/v1/users/me', query: { values: ['one'] } })",
+			} });
+			assert.equal(result.isError, true);
+		});
+		assert.equal(outboundCalls, 0);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
 test("calls Google Workspace through signed JWTs, fixed delegation, and a private token cache", async (t) => {
 	const originalFetch = globalThis.fetch;
 	const requests = [];
@@ -776,6 +811,20 @@ test("shares bounded reliability behavior across connector operations", async (t
 	const run = async options => (await debugServer.getWorker("reliability-test").fetch("https://test.example/", {
 		method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(options),
 	})).json();
+	await t.test("shares request validation without widening provider contracts", async () => {
+		const contract = { methods: ["GET", "POST"], pathPrefix: "/api/" };
+		const args = { method: "GET", path: "/api/items", query: { flag: true, count: 2, name: "test" } };
+		assert.deepEqual((await run({ action: "inputs", contract, args })).result, args);
+		const write = { ...args, method: "POST", body: { name: "test" } };
+		assert.deepEqual((await run({ action: "inputs", contract, args: write })).result, write);
+		for (const invalid of [null, [], "request", { ...args, extra: true }, { ...args, method: "PUT" }, { ...args, method: 1 }, { ...args, path: "/outside" }, { ...args, path: null }, { ...args, query: null }, { ...args, query: [] }, { ...args, query: { nested: {} } }, { ...args, query: { values: ["one"] } }, { ...args, body: null }]) {
+			assert.ok((await run({ action: "inputs", contract, args: invalid })).error, JSON.stringify(invalid));
+		}
+		const googleContract = { ...contract, queryArrays: true, extraKeys: ["service"] };
+		const googleArgs = { ...args, service: "gmail", query: { values: ["one", 2, true] } };
+		assert.deepEqual((await run({ action: "inputs", contract: googleContract, args: googleArgs })).result, { method: googleArgs.method, path: googleArgs.path, query: googleArgs.query });
+		assert.ok((await run({ action: "inputs", contract: googleContract, args: { ...googleArgs, query: { nested: [["one"]] } } })).error);
+	});
 	await t.test("parses Retry-After seconds and HTTP dates, rejecting malformed values", async () => {
 		assert.deepEqual(await run({ action: "retry-after", values: [null, "", "5", "0", "-1", "Infinity", "garbage", "Thu, 01 Jan 1970 00:00:05 GMT"] }), [null, null, 5000, 0, null, null, null, 5000]);
 	});

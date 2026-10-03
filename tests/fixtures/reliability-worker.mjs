@@ -4,6 +4,7 @@ import {
 	createApiUrl,
 	parseRetryAfter,
 } from "../../src/connector-requests.ts";
+import { readApiRequestArgs } from "../../src/connector-inputs.ts";
 
 export default {
 	async fetch(request) {
@@ -22,6 +23,8 @@ export default {
 		let failuresRemaining = options.failuresBeforeSuccess ?? Infinity;
 		const dispatchTimes = [];
 		try {
+			if (options.action === "inputs")
+				return Response.json({ result: readApiRequestArgs(options.args, options.contract) });
 			if (options.action === "retry-after")
 				return Response.json(options.values.map((value) => parseRetryAfter(value, 0) ?? null));
 			if (options.action === "url")

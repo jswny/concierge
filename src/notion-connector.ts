@@ -1,16 +1,10 @@
 import { CodemodeConnector, type ConnectorTools } from "@cloudflare/codemode";
-import { ConnectorRequests, createApiUrl, isRecord, isScalar, type ApiFailure } from "./connector-requests";
+import { ConnectorRequests, createApiUrl, isRecord, type ApiFailure } from "./connector-requests";
+import { readApiRequestArgs } from "./connector-inputs";
 
 const NOTION_API_BASE = "https://api.notion.com";
 const NOTION_VERSION = "2026-03-11";
 const NOTION_METHODS = ["GET", "POST", "PATCH", "DELETE"];
-
-type NotionRequestArgs = {
-	body?: unknown;
-	method: string;
-	path: string;
-	query?: Record<string, boolean | number | string>;
-};
 
 export class NotionConnector extends CodemodeConnector<Env> {
 	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests) {
@@ -62,9 +56,8 @@ export class NotionConnector extends CodemodeConnector<Env> {
 					additionalProperties: false,
 				},
 				execute: async (args) => {
-					const options = readRequestArgs(args);
+					const options = readApiRequestArgs(args, { methods: NOTION_METHODS, pathPrefix: "/v1/" });
 					if (!this.env.NOTION_TOKEN) throw new Error("NOTION_TOKEN is not configured.");
-					if (options.method === "GET" && options.body !== undefined) throw new Error("GET requests cannot include a body.");
 					return this.requests.request({
 						connector: "Notion",
 						operation: "request",
@@ -80,33 +73,6 @@ export class NotionConnector extends CodemodeConnector<Env> {
 			},
 		};
 	}
-}
-
-function readRequestArgs(args: unknown): NotionRequestArgs {
-	if (!isRecord(args) || Object.keys(args).some((key) => !["body", "method", "path", "query"].includes(key))) {
-		throw new Error("Expected a Notion request object.");
-	}
-
-	const { body, method, path, query } = args;
-	if (typeof method !== "string" || !NOTION_METHODS.includes(method)) {
-		throw new Error(`Expected method to be one of: ${NOTION_METHODS.join(", ")}.`);
-	}
-	if (typeof path !== "string" || !path.startsWith("/v1/")) {
-		throw new Error("Expected path to begin with /v1/.");
-	}
-	if (query !== undefined && !isRecord(query)) {
-		throw new Error("Expected query to be an object of scalar values.");
-	}
-
-	const parsedQuery: Record<string, boolean | number | string> = {};
-	for (const [key, value] of Object.entries(query ?? {})) {
-		if (!isScalar(value)) {
-			throw new Error(`Expected query parameter ${key} to be a scalar value.`);
-		}
-		parsedQuery[key] = value as boolean | number | string;
-	}
-
-	return { body, method, path, query: parsedQuery };
 }
 
 function classifyNotionError(status: number, payload: unknown): ApiFailure {

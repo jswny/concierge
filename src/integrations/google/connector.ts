@@ -1,6 +1,7 @@
 import { CodemodeConnector, type ConnectorTools } from "@cloudflare/codemode";
 import { GoogleWorkspaceAuth } from "./auth";
-import { ConnectorRequests, createApiUrl, isRecord, isScalar, type ApiFailure, type QueryValue } from "../../connector-requests";
+import { ConnectorRequests, createApiUrl, isRecord, type ApiFailure } from "../../connector-requests";
+import { readApiRequestArgs, type ApiRequestArgs } from "../../connector-inputs";
 
 const SERVICES = {
 	gmail: {
@@ -14,12 +15,8 @@ const SERVICES = {
 	},
 } as const;
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"];
-type GoogleRequest = {
+type GoogleRequest = ApiRequestArgs & {
 	service: keyof typeof SERVICES;
-	method: string;
-	path: string;
-	query?: Record<string, QueryValue>;
-	body?: unknown;
 };
 
 export class GoogleConnector extends CodemodeConnector<Env> {
@@ -74,9 +71,6 @@ export class GoogleConnector extends CodemodeConnector<Env> {
 	private async request(options: GoogleRequest) {
 		const service = SERVICES[options.service];
 		const url = createApiUrl(service.origin, service.pathPrefix, options.path, options.query);
-		if (options.method === "GET" && options.body !== undefined) {
-			throw new Error("GET requests cannot include a body.");
-		}
 		return this.requests.request({
 			connector: "Google",
 			operation: options.service,
@@ -94,24 +88,20 @@ export class GoogleConnector extends CodemodeConnector<Env> {
 }
 
 function readRequest(args: unknown): GoogleRequest {
-	if (!isRecord(args) || Object.keys(args).some((key) => !["service", "method", "path", "query", "body"].includes(key))) {
-		throw new Error("Expected a Google request with service, method, path, and optional query/body.");
-	}
-	const { service, method, path, query, body } = args;
+	const service = isRecord(args) ? args.service : undefined;
 	if (typeof service !== "string" || !Object.prototype.hasOwnProperty.call(SERVICES, service)) {
 		throw new Error(`Expected Google service to be one of: ${Object.keys(SERVICES).join(", ")}.`);
 	}
-	if (typeof method !== "string" || !METHODS.includes(method)) {
-		throw new Error(`Expected method to be one of: ${METHODS.join(", ")}.`);
-	}
-	if (typeof path !== "string" || !path.startsWith(SERVICES[service as keyof typeof SERVICES].pathPrefix)) {
-		throw new Error("Expected a relative Google API path for users/me.");
-	}
-	if (query !== undefined && (!isRecord(query) || Object.values(query).some((value) =>
-		!(Array.isArray(value) ? value.every(isScalar) : isScalar(value))))) {
-		throw new Error("Expected Google query parameters to be scalar values or arrays of scalar values.");
-	}
-	return { service: service as keyof typeof SERVICES, method, path, query: query as GoogleRequest["query"], body };
+	const selectedService = service as keyof typeof SERVICES;
+	return {
+		...readApiRequestArgs(args, {
+			methods: METHODS,
+			pathPrefix: SERVICES[selectedService].pathPrefix,
+			queryArrays: true,
+			extraKeys: ["service"],
+		}),
+		service: selectedService,
+	};
 }
 
 function classifyGoogleError(status: number, payload: unknown): ApiFailure {

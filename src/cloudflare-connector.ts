@@ -1,10 +1,11 @@
 import { CodemodeConnector, type ConnectorTools } from "@cloudflare/codemode";
-
-type BrowserRunMarkdownResponse =
-	| { result: string; success: true }
-	| { errors?: Array<{ code?: number; detail?: string; message: string }>; success: false };
+import { ConnectorError, ConnectorRequests, isRecord, type ApiFailure } from "./connector-requests";
 
 export class CloudflareConnector extends CodemodeConnector<Env> {
+	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests) {
+		super(ctx, env);
+	}
+
 	name() {
 		return "cloudflare";
 	}
@@ -36,11 +37,32 @@ export class CloudflareConnector extends CodemodeConnector<Env> {
 				replay: "reexecute",
 				execute: async (args) => {
 					const url = readUrlArg(args);
-					return readWebpageAsMarkdown(this.env, url);
+					const parsedUrl = new URL(url);
+					if (!["http:", "https:"].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password) throw new Error("Only public HTTP and HTTPS URLs without credentials are supported.");
+					return this.requests.run({ connector: "Cloudflare", operation: "read_webpage_as_markdown", readOnly: true, timeoutMs: 45_000 }, async (attempt) => {
+						attempt.dispatch();
+						const response = await this.env.BROWSER.quickAction("markdown", {
+							url: parsedUrl.toString(),
+							gotoOptions: { waitUntil: "networkidle0", timeout: Math.min(30_000, attempt.remainingMs()) },
+						});
+						const payload = await this.requests.responsePayload(response, attempt, { classifyError: classifyBrowserError });
+						if (isRecord(payload) && payload.success === false) throw this.requests.httpError(response, payload, { classifyError: classifyBrowserError });
+						if (!isRecord(payload) || payload.success !== true || typeof payload.result !== "string") throw new ConnectorError({ category: "invalid_response", message: "Browser Run returned an invalid Markdown response." });
+						attempt.succeeded();
+						return payload.result;
+					});
 				},
 			},
 		};
 	}
+}
+
+function classifyBrowserError(_status: number, payload: unknown): ApiFailure {
+	const error = isRecord(payload) && Array.isArray(payload.errors) && isRecord(payload.errors[0]) ? payload.errors[0] : {};
+	return {
+		message: typeof error.message === "string" ? error.message : undefined,
+		code: typeof error.code === "number" ? String(error.code) : undefined,
+	};
 }
 
 function readUrlArg(args: unknown) {
@@ -54,36 +76,4 @@ function readUrlArg(args: unknown) {
 	}
 
 	return url;
-}
-
-async function readWebpageAsMarkdown(env: Env, url: string) {
-	const parsedUrl = new URL(url);
-	if (!["http:", "https:"].includes(parsedUrl.protocol)) {
-		throw new Error("Only HTTP and HTTPS URLs are supported.");
-	}
-
-	const response = await env.BROWSER.quickAction("markdown", {
-		url: parsedUrl.toString(),
-		gotoOptions: {
-			waitUntil: "networkidle0",
-		},
-	});
-	const payload = (await response.json()) as BrowserRunMarkdownResponse;
-
-	if (!response.ok || !payload.success) {
-		const errors =
-			payload.success === false && payload.errors?.length
-				? payload.errors
-						.map((error) =>
-							[error.message, error.detail, error.code && `code ${error.code}`]
-								.filter(Boolean)
-								.join(" "),
-						)
-						.join("\n")
-				: `Browser Run returned HTTP ${response.status}.`;
-
-		throw new Error(errors);
-	}
-
-	return payload.result;
 }

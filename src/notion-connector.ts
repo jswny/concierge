@@ -1,4 +1,5 @@
 import { CodemodeConnector, type ConnectorTools } from "@cloudflare/codemode";
+import { ConnectorRequests, createApiUrl, isRecord, isScalar, type ApiFailure } from "./connector-requests";
 
 const NOTION_API_BASE = "https://api.notion.com";
 const NOTION_VERSION = "2026-03-11";
@@ -12,6 +13,10 @@ type NotionRequestArgs = {
 };
 
 export class NotionConnector extends CodemodeConnector<Env> {
+	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests) {
+		super(ctx, env);
+	}
+
 	name() {
 		return "notion";
 	}
@@ -56,14 +61,29 @@ export class NotionConnector extends CodemodeConnector<Env> {
 					required: ["method", "path"],
 					additionalProperties: false,
 				},
-				execute: async (args) => requestNotion(this.env, readRequestArgs(args)),
+				execute: async (args) => {
+					const options = readRequestArgs(args);
+					if (!this.env.NOTION_TOKEN) throw new Error("NOTION_TOKEN is not configured.");
+					if (options.method === "GET" && options.body !== undefined) throw new Error("GET requests cannot include a body.");
+					return this.requests.request({
+						connector: "Notion",
+						operation: "request",
+						readOnly: options.method === "GET",
+						url: createApiUrl(NOTION_API_BASE, "/v1/", options.path, options.query),
+						method: options.method,
+						headers: { Authorization: `Bearer ${this.env.NOTION_TOKEN}`, "Notion-Version": NOTION_VERSION },
+						body: options.body === undefined ? undefined : JSON.stringify(options.body),
+						format: "json-or-text",
+						classifyError: classifyNotionError,
+					});
+				},
 			},
 		};
 	}
 }
 
 function readRequestArgs(args: unknown): NotionRequestArgs {
-	if (!isRecord(args)) {
+	if (!isRecord(args) || Object.keys(args).some((key) => !["body", "method", "path", "query"].includes(key))) {
 		throw new Error("Expected a Notion request object.");
 	}
 
@@ -80,7 +100,7 @@ function readRequestArgs(args: unknown): NotionRequestArgs {
 
 	const parsedQuery: Record<string, boolean | number | string> = {};
 	for (const [key, value] of Object.entries(query ?? {})) {
-		if (!["boolean", "number", "string"].includes(typeof value)) {
+		if (!isScalar(value)) {
 			throw new Error(`Expected query parameter ${key} to be a scalar value.`);
 		}
 		parsedQuery[key] = value as boolean | number | string;
@@ -89,81 +109,14 @@ function readRequestArgs(args: unknown): NotionRequestArgs {
 	return { body, method, path, query: parsedQuery };
 }
 
-async function requestNotion(env: Env, options: NotionRequestArgs) {
-	if (!env.NOTION_TOKEN) {
-		throw new Error("NOTION_TOKEN is not configured.");
-	}
-
-	const url = createNotionUrl(options.path, options.query);
-	const response = await fetch(url, {
-		method: options.method,
-		headers: {
-			Accept: "application/json",
-			Authorization: `Bearer ${env.NOTION_TOKEN}`,
-			"Content-Type": "application/json",
-			"Notion-Version": NOTION_VERSION,
-		},
-		body:
-			options.body === undefined || options.method === "GET"
-				? undefined
-				: JSON.stringify(options.body),
-		redirect: "manual",
-	});
-	const payload = await readResponsePayload(response);
-
-	if (!response.ok) {
-		throw new Error(formatNotionError(response, payload));
-	}
-
-	return payload;
-}
-
-function createNotionUrl(path: string, query: Record<string, boolean | number | string> = {}) {
-	const url = new URL(path, NOTION_API_BASE);
-	if (url.origin !== NOTION_API_BASE || !url.pathname.startsWith("/v1/")) {
-		throw new Error("Notion requests must stay under https://api.notion.com/v1/.");
-	}
-
-	for (const [key, value] of Object.entries(query)) {
-		url.searchParams.append(key, String(value));
-	}
-
-	return url;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
-async function readResponsePayload(response: Response) {
-	const text = await response.text();
-	if (!text) {
-		return null;
-	}
-
-	try {
-		return JSON.parse(text) as unknown;
-	} catch {
-		return text;
-	}
-}
-
-function formatNotionError(response: Response, payload: unknown) {
-	const retryAfter = response.headers.get("Retry-After");
-	const prefix = `Notion API returned HTTP ${response.status}`;
-
-	if (payload && typeof payload === "object") {
-		const { code, message } = payload as { code?: unknown; message?: unknown };
-		const details = [typeof code === "string" && code, typeof message === "string" && message]
-			.filter(Boolean)
-			.join(": ");
-
-		return [prefix, details, retryAfter && `Retry-After: ${retryAfter}s`]
-			.filter(Boolean)
-			.join(". ");
-	}
-
-	return [prefix, typeof payload === "string" && payload, retryAfter && `Retry-After: ${retryAfter}s`]
-		.filter(Boolean)
-		.join(". ");
+function classifyNotionError(status: number, payload: unknown): ApiFailure {
+	const data = isRecord(payload) ? payload : {};
+	const blocked = isRecord(data.additional_data) && data.additional_data.rate_limit_reason === "public_api_request_blocked";
+	return {
+		code: typeof data.code === "string" ? data.code : undefined,
+		requestId: typeof data.request_id === "string" ? data.request_id : undefined,
+		message: typeof data.message === "string" ? data.message : undefined,
+		...(blocked ? { category: "permission", retryable: false } as const :
+			status === 429 || status === 529 ? { category: "rate_limited", retryable: true, safeToReplay: true, outcome: "rejected" } as const : {}),
+	};
 }

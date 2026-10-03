@@ -14,6 +14,7 @@ import { CloudflareConnector } from "./cloudflare-connector";
 import { GoogleWorkspaceAuth } from "./integrations/google/auth";
 import { GoogleConnector } from "./integrations/google/connector";
 import { NotionConnector } from "./notion-connector";
+import { ConnectorRequests } from "./connector-requests";
 
 export { CodemodeRuntime } from "@cloudflare/codemode";
 
@@ -33,6 +34,7 @@ function createConciergeServer(
 	ctx: DurableObjectState,
 	env: DebugEnv,
 	googleAuth: GoogleWorkspaceAuth,
+	requests: ConnectorRequests,
 ) {
 	const server = new McpServer({
 		name: "Concierge MCP",
@@ -40,9 +42,9 @@ function createConciergeServer(
 	});
 	const runtime = createCodemodeRuntime({
 		connectors: [
-			new CloudflareConnector(ctx, env),
-			new NotionConnector(ctx, env),
-			new GoogleConnector(ctx, env, googleAuth),
+			new CloudflareConnector(ctx, env, requests),
+			new NotionConnector(ctx, env, requests),
+			new GoogleConnector(ctx, env, googleAuth, requests),
 		],
 		ctx,
 		executor: new DynamicWorkerExecutor({ loader: env.LOADER }),
@@ -107,12 +109,20 @@ function createConciergeCodeToolDescription(defaultDescription: string) {
 		].join("\n"),
 	);
 
-	return appendMarkdownSection(
+	const withOutputFormat = appendMarkdownSection(
 		withToolDiscovery,
 		"Output Format",
 		[
 			"The Code Mode result is the single value returned by the async function. Return any value the model should receive for later reasoning; console logs and intermediate values are not returned.",
 			"If multiple values are needed, return one object that contains them, e.g. `return { first, second };`.",
+		].join("\n"),
+	);
+	return appendMarkdownSection(
+		withOutputFormat,
+		"Failure Recovery",
+		[
+			"A failed code invocation does not undo earlier connector calls. Do not blindly rerun the whole function; inspect earlier side effects before continuing.",
+			"Connector errors include retryability, replay safety, and write outcomes. Do not replay a write with `outcome=unknown` or `outcome=succeeded`; verify external state first. Respect `Retry-After` guidance and use smaller batches or responses when requested.",
 		].join("\n"),
 	);
 }
@@ -187,12 +197,13 @@ function handleMcpRequest(request: Request, env: DebugEnv) {
 }
 
 export class ConciergeMcpRuntime extends DurableObject<DebugEnv> {
-	private readonly googleAuth = new GoogleWorkspaceAuth(this.env);
+	private readonly requests = new ConnectorRequests();
+	private readonly googleAuth = new GoogleWorkspaceAuth(this.env, this.requests);
 
 	fetch(request: Request) {
 		const pathname = new URL(request.url).pathname;
 		const route = pathname === "/debug/mcp" ? "/debug/mcp" : "/mcp";
-		return createMcpHandler(() => createConciergeServer(this.ctx, this.env, this.googleAuth), {
+		return createMcpHandler(() => createConciergeServer(this.ctx, this.env, this.googleAuth, this.requests), {
 			allowedHostnames: MCP_ALLOWED_HOSTNAMES,
 			route,
 		})(

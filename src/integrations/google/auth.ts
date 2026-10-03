@@ -1,4 +1,5 @@
 import { importPKCS8, SignJWT } from "jose";
+import { ConnectorError, ConnectorRequests, isRecord } from "../../connector-requests";
 
 const SERVICE_ACCOUNT = "concierge@j1-concierge.iam.gserviceaccount.com";
 const WORKSPACE_USER = "joe@j1.io";
@@ -11,7 +12,7 @@ export class GoogleWorkspaceAuth {
 	#pending = new Map<string, Promise<AccessToken>>();
 	#credentials?: Promise<{ key: CryptoKey; kid: string }>;
 
-	constructor(private readonly env: Env) {}
+	constructor(private readonly env: Env, private readonly requests: ConnectorRequests) {}
 
 	async accessToken(scopes: readonly string[]) {
 		const key = [...scopes].sort().join(" ");
@@ -41,27 +42,29 @@ export class GoogleWorkspaceAuth {
 
 	private async exchange(scope: string): Promise<AccessToken> {
 		const startedAt = Date.now();
-		const { key, kid } = await (this.#credentials ??= readCredentials(this.env.GOOGLE_SERVICE_ACCOUNT_JSON));
-		const iat = Math.floor(Date.now() / 1000);
-		const assertion = await new SignJWT({ sub: WORKSPACE_USER, scope })
-			.setProtectedHeader({ alg: "RS256", typ: "JWT", kid })
-			.setIssuer(SERVICE_ACCOUNT)
-			.setAudience("https://oauth2.googleapis.com/token")
-			.setIssuedAt(iat)
-			.setExpirationTime(iat + 600)
-			.sign(key);
-		const delegated = await readAuthResponse(
-			await fetch("https://oauth2.googleapis.com/token", {
-				method: "POST",
-				body: new URLSearchParams({
-					grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-					assertion,
-				}),
-				redirect: "manual",
-				signal: AbortSignal.timeout(20_000),
-			}),
-			"Workspace token exchange",
-		);
+		const delegated = await this.requests.request({
+			connector: "Google authentication",
+			operation: "Workspace token exchange",
+			readOnly: true,
+			timeoutMs: 20_000,
+			url: new URL("https://oauth2.googleapis.com/token"),
+			method: "POST",
+			headers: { "Content-Type": "application/x-www-form-urlencoded" },
+			sensitive: true,
+			body: async () => {
+				const { key, kid } = await (this.#credentials ??= readCredentials(this.env.GOOGLE_SERVICE_ACCOUNT_JSON));
+				const iat = Math.floor(Date.now() / 1000);
+				const assertion = await new SignJWT({ sub: WORKSPACE_USER, scope })
+					.setProtectedHeader({ alg: "RS256", typ: "JWT", kid })
+					.setIssuer(SERVICE_ACCOUNT)
+					.setAudience("https://oauth2.googleapis.com/token")
+					.setIssuedAt(iat)
+					.setExpirationTime(iat + 600)
+					.sign(key);
+				return new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion });
+			},
+		});
+		if (!isRecord(delegated)) throw new ConnectorError({ category: "invalid_response", message: "Google Workspace token exchange returned an invalid response." });
 		return readAccessToken(delegated, "Workspace token exchange", startedAt);
 	}
 }
@@ -75,26 +78,8 @@ async function readCredentials(value: string) {
 		) throw new Error("Invalid service-account key.");
 		return { key: await importPKCS8(data.private_key, "RS256"), kid: data.private_key_id };
 	} catch {
-		throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON must contain a valid key for the Concierge service account.");
+		throw new ConnectorError({ category: "configuration", message: "GOOGLE_SERVICE_ACCOUNT_JSON must contain a valid key for the Concierge service account." });
 	}
-}
-
-async function readAuthResponse(response: Response, stage: string): Promise<Record<string, unknown>> {
-	if (!response.ok) {
-		// Never expose token-service bodies: they can contain credential material.
-		await response.body?.cancel();
-		throw new Error(`Google ${stage} returned HTTP ${response.status}.`);
-	}
-	let data: unknown;
-	try {
-		data = await response.json();
-	} catch {
-		throw new Error(`Google ${stage} returned invalid JSON.`);
-	}
-	if (!data || typeof data !== "object" || Array.isArray(data)) {
-		throw new Error(`Google ${stage} returned an invalid response.`);
-	}
-	return data as Record<string, unknown>;
 }
 
 function readAccessToken(data: Record<string, unknown>, stage: string, startedAt = Date.now()): AccessToken {
@@ -103,7 +88,7 @@ function readAccessToken(data: Record<string, unknown>, stage: string, startedAt
 		typeof data.expires_in !== "number" || !Number.isFinite(data.expires_in) ||
 		data.expires_in <= TOKEN_LEEWAY_MS / 1000
 	) {
-		throw new Error(`Google ${stage} returned an invalid access token.`);
+		throw new ConnectorError({ category: "invalid_response", message: `Google ${stage} returned an invalid access token.` });
 	}
 	return {
 		value: data.access_token,

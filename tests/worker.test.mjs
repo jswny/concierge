@@ -495,6 +495,8 @@ test("serves the code tool over the modern MCP protocol", async () => {
 			const [tool] = tools;
 			assert.equal(tool.name, "code");
 			assert.match(tool.description ?? "", /codemode\.search.*connector method names/s);
+			assert.match(tool.description ?? "", /failed code invocation does not undo earlier connector calls/);
+			assert.match(tool.description ?? "", /outcome=unknown/);
 			assert.deepEqual(tool.annotations, {
 				destructiveHint: true,
 				idempotentHint: false,
@@ -649,7 +651,7 @@ test("calls Google Workspace through signed JWTs, fixed delegation, and a privat
 		assert.equal(request.headers.get("Authorization"), "Bearer test-google-workspace-token");
 		if (apiStatus === 204) return new Response(null, { status: 204 });
 		if (apiStatus === 302) return new Response(null, { status: 302, headers: { Location: "https://evil.example/steal" } });
-		return Response.json(apiPayload, { status: apiStatus, headers: { "Retry-After": "5" } });
+		return Response.json(apiPayload, { status: apiStatus, headers: { "Retry-After": "0" } });
 	};
 	const count = (hostname) => requests.filter((request) => new URL(request.url).hostname === hostname).length;
 	const call = (client, options) => client.callTool({ name: "code", arguments: {
@@ -719,7 +721,7 @@ test("calls Google Workspace through signed JWTs, fixed delegation, and a privat
 				assert.equal(count("oauth2.googleapis.com"), 2);
 				apiStatus = 429;
 				apiPayload = { error: { message: "Rate limit exceeded" } };
-				assert.match((await call(client, profile)).content[0].text, /Rate limit exceeded.*Retry-After: 5s/);
+				assert.match((await call(client, profile)).content[0].text, /Rate limit exceeded.*Retry-After: 0s/);
 				apiStatus = 401;
 				await call(client, profile);
 				apiStatus = 200;
@@ -770,6 +772,262 @@ test("calls Google Workspace through signed JWTs, fixed delegation, and a privat
 	}
 });
 
+test("shares bounded reliability behavior across connector operations", async (t) => {
+	const run = async options => (await debugServer.getWorker("reliability-test").fetch("https://test.example/", {
+		method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(options),
+	})).json();
+	await t.test("parses Retry-After seconds and HTTP dates, rejecting malformed values", async () => {
+		assert.deepEqual(await run({ action: "retry-after", values: [null, "", "5", "0", "-1", "Infinity", "garbage", "Thu, 01 Jan 1970 00:00:05 GMT"] }), [null, null, 5000, 0, null, null, null, 5000]);
+	});
+	await t.test("validates API URL boundaries and serializes finite scalar queries", async () => {
+		const allowed = await run({ action: "url", path: "/api/items", query: { tag: ["one", "two"], enabled: true } });
+		assert.equal(allowed.url, "https://example.com/api/items?tag=one&tag=two&enabled=true");
+		for (const path of ["https://evil.example/api/items", "/api/../../outside", "/api/%2e%2e/outside", "/api/a%2fb", "/api/items?token=evil", "/api/items#fragment", "/api/\\evil"]) {
+			assert.ok((await run({ action: "url", path })).error, path);
+		}
+		assert.ok((await run({ action: "url", path: "/api/items", query: { access_token: "evil" } })).error);
+	});
+	await t.test("bounds retries and does not replay ambiguous writes", async () => {
+		const failure = { category: "http", message: "API returned HTTP 503.", retryable: true, status: 503 };
+		const read = await run({ failure });
+		assert.equal(read.attempts, 3);
+		assert.match(read.results[0].error, /attempts=3/);
+		const write = await run({ failure, readOnly: false });
+		assert.equal(write.attempts, 1);
+		assert.match(write.results[0].error, /safe_to_replay=false.*outcome=unknown.*verify external state/);
+		const network = await run({ failureRaw: true, readOnly: false });
+		assert.equal(network.attempts, 1);
+		assert.equal(network.results[0].details.category, "network");
+		assert.doesNotMatch(network.results[0].error, /fixture-secret/);
+		const idempotent = await run({ failure, readOnly: false, replaySafe: true });
+		assert.equal(idempotent.attempts, 3);
+		const uncertain = await run({ failure, readOnly: false, replaySafe: true, failPreparationAfterFirst: true });
+		assert.equal(uncertain.attempts, 2);
+		assert.equal(uncertain.results[0].details.outcome, "unknown", "Later preparation failure must not erase an earlier uncertain write.");
+		const rejected = await run({ failure: { ...failure, category: "rate_limited", safeToReplay: true, outcome: "rejected" }, readOnly: false });
+		assert.equal(rejected.attempts, 3);
+		assert.equal(rejected.results[0].details.outcome, "rejected");
+	});
+	await t.test("surfaces long Retry-After without retrying ahead of the provider", async () => {
+		const result = await run({ count: 2, limits: { concurrency: 1 }, failure: { category: "rate_limited", message: "Wait.", retryable: true, retryAfterMs: 60_000 } });
+		assert.equal(result.attempts, 1);
+		assert.match(result.results[0].error, /Retry-After: 60s/);
+		assert.equal(result.results[1].details.outcome, "not_started");
+	});
+	await t.test("honors Retry-After and shares cooldowns with queued provider operations", async () => {
+		const result = await run({ count: 2, delayMs: 1, limits: { concurrency: 1 }, failuresBeforeSuccess: 1, failure: { category: "rate_limited", message: "Wait.", retryable: true, retryAfterMs: 40 } });
+		assert.equal(result.attempts, 3);
+		assert.ok(result.dispatchTimes[1] - result.dispatchTimes[0] >= 40);
+		assert.ok(result.dispatchTimes[2] - result.dispatchTimes[0] >= 40);
+		assert.ok(result.results.every(result => result.result === "ok"));
+	});
+	await t.test("limits concurrency, bounds the queue, and retains permits for non-cancellable work", async () => {
+		const parallel = await run({ count: 8, delayMs: 15, limits: { concurrency: 2 } });
+		assert.equal(parallel.peak, 2);
+		assert.equal(parallel.attempts, 8);
+		assert.ok(parallel.results.every(result => result.result === "ok"));
+		const bounded = await run({ count: 5, delayMs: 40, limits: { concurrency: 1, maxQueued: 1 } });
+		assert.equal(bounded.attempts, 2);
+		assert.equal(bounded.results.filter(result => result.details?.category === "busy").length, 3);
+		const expired = await run({ count: 3, delayMs: 100, readOnly: false, limits: { timeoutMs: 25, concurrency: 1 } });
+		assert.equal(expired.attempts, 1);
+		assert.equal(expired.peak, 1);
+		assert.equal(expired.active, 0);
+		assert.equal(expired.results[0].details.outcome, "unknown");
+		assert.equal(expired.results[1].details.outcome, "not_started");
+	});
+	await t.test("deadlines cover body reading and size limits cancel streams", async () => {
+		const slow = await run({ action: "body", readOnly: false, limits: { timeoutMs: 25 } });
+		assert.equal(slow.cancelled, true);
+		assert.equal(slow.results[0].details.category, "timeout");
+		assert.equal(slow.results[0].details.outcome, "succeeded");
+		const large = await run({ action: "body", body: "x".repeat(100), limits: { maxResponseBytes: 16 } });
+		assert.equal(large.cancelled, true);
+		assert.equal(large.results[0].details.category, "response_too_large");
+	});
+	await t.test("HTTP requests include preparation in deadlines and redact credentials", async () => {
+		const originalFetch = globalThis.fetch;
+		let requests = 0;
+		let mode = "failure";
+		globalThis.fetch = async (input, init) => {
+			const request = new Request(input, init);
+			if (request.url !== "https://reliability.example/api") return originalFetch(input, init);
+			requests++;
+			if (mode === "redirect") return new Response(null, { status: 302, headers: { Location: "https://evil.example/credentials" } });
+			if (mode === "invalid") return new Response("not-json");
+			if (mode === "authentication") return Response.json({ message: "fixture-secret private-token-body" }, { status: 401 });
+			if (mode === "success") return Response.json({ unchanged: true });
+			return Response.json({ message: "Rejected fixture-secret", code: "fixture-secret" }, { status: 503, headers: { "X-Request-Id": "request-123" } });
+		};
+		try {
+			const failed = await run({ action: "request" });
+			assert.equal(requests, 3);
+			assert.match(failed.error, /\[redacted\]/);
+			assert.doesNotMatch(failed.error, /fixture-secret/);
+			assert.equal(failed.details.requestId, "request-123");
+			mode = "redirect";
+			const redirect = await run({ action: "request", readOnly: false });
+			assert.equal(requests, 4);
+			assert.equal(redirect.details.status, 302);
+			mode = "invalid";
+			const malformedWrite = await run({ action: "request", readOnly: false });
+			assert.equal(malformedWrite.details.category, "invalid_response");
+			assert.equal(malformedWrite.details.outcome, "succeeded");
+			mode = "authentication";
+			const auth = await run({ action: "request" });
+			assert.equal(auth.details.category, "authentication");
+			assert.doesNotMatch(auth.error, /fixture-secret|private-token-body/);
+			const before = requests;
+			const deadline = await run({ action: "request", readOnly: false, prepareMs: 100, limits: { timeoutMs: 25 } });
+			assert.equal(deadline.details.category, "timeout");
+			assert.equal(deadline.details.outcome, "not_started");
+			await new Promise(resolve => setTimeout(resolve, 120));
+			assert.equal(requests, before, "Expired preparation must not dispatch a late write.");
+			mode = "success";
+			assert.deepEqual((await run({ action: "request" })).result, { unchanged: true });
+		} finally { globalThis.fetch = originalFetch; }
+	});
+});
+
+test("applies shared reliability to real MCP connector calls without replaying Code Mode", async (t) => {
+	const originalFetch = globalThis.fetch;
+	let mode = "retry";
+	let calls = 0;
+	let writes = 0;
+	let active = 0;
+	let peak = 0;
+	let googleCalls = 0;
+	let authCalls = 0;
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		const host = new URL(request.url).hostname;
+		if (host === "oauth2.googleapis.com") {
+			authCalls++;
+			if (mode === "google-auth-failure") return Response.json({ error_description: "private signed assertion must not escape" }, { status: 503 });
+			return Response.json({ access_token: "test-google-workspace-token", expires_in: 3600 });
+		}
+		if (host === "gmail.googleapis.com") {
+			googleCalls++;
+			if (mode === "google-invalid") return new Response("invalid-json");
+			if (mode === "google-auth-invalidate") return Response.json({ error: { message: "rejected token" } }, { status: 401 });
+			if (mode === "google-permission") return Response.json({ error: { message: "private forbidden body", errors: [{ reason: "domainPolicy" }] } }, { status: 403 });
+			if (mode === "google-rate-write") return Response.json({ error: { message: "rate limit", errors: [{ reason: "userRateLimitExceeded" }] } }, { status: 403 });
+			if (mode === "google-rate" && googleCalls === 1) return Response.json({ error: { errors: [{ reason: "rateLimitExceeded" }] } }, { status: 403 });
+			return Response.json({ emailAddress: "joe@j1.io" });
+		}
+		if (host !== "api.notion.com") return originalFetch(input, init);
+		calls++;
+		assert.equal(request.headers.get("Authorization"), "Bearer test-notion-token");
+		if (mode === "parallel") {
+			active++; peak = Math.max(peak, active);
+			await new Promise(resolve => setTimeout(resolve, 20));
+			active--;
+			return Response.json({ ok: true });
+		}
+		if (request.method === "POST") {
+			writes++;
+			if (mode === "uncertain-write") return Response.json({ code: "service_unavailable", message: "try again" }, { status: 503 });
+			if (mode === "rate-write" && writes === 1) return Response.json({ code: "rate_limited" }, { status: 429, headers: { "Retry-After": "0" } });
+			if (mode === "overload-write" && writes === 1) return Response.json({ code: "service_overload" }, { status: 529, headers: { "Retry-After": "0" } });
+			return Response.json({ created: true });
+		}
+		if (mode === "blocked") return Response.json({ message: "private forbidden body", additional_data: { rate_limit_reason: "public_api_request_blocked" } }, { status: 429 });
+		if (mode === "retry" && calls < 3 || mode === "sequence" && calls === 2) return Response.json({ code: "service_unavailable", message: "temporary failure" }, { status: 503 });
+		return Response.json({ ok: true });
+	};
+	const read = "notion.request({ method: 'GET', path: '/v1/users/me' })";
+	const write = "notion.request({ method: 'POST', path: '/v1/pages', body: { parent: {} } })";
+	const invoke = (client, code) => client.callTool({ name: "code", arguments: { code } });
+	try {
+		await withMcpClient(undefined, async client => {
+			await t.test("retries reads while preserving successful tool output", async () => {
+				assert.deepEqual((await invoke(client, `async () => await ${read}`)).structuredContent, { result: { ok: true } });
+				assert.equal(calls, 3);
+			});
+			await t.test("does not repeat an uncertain write and preserves catchable error guidance", async () => {
+				mode = "uncertain-write"; calls = 0; writes = 0;
+				const result = await invoke(client, `async () => { try { return await ${write}; } catch (error) { return String(error); } }`);
+				assert.equal(writes, 1);
+				assert.match(result.structuredContent.result, /safe_to_replay=false.*outcome=unknown.*verify external state/);
+			});
+			await t.test("retries a Notion-confirmed rate-limit rejection of a write", async () => {
+				mode = "rate-write"; calls = 0; writes = 0;
+				assert.deepEqual((await invoke(client, `async () => await ${write}`)).structuredContent, { result: { created: true } });
+				assert.equal(writes, 2);
+			});
+			await t.test("does not retry Notion access restrictions or expose forbidden bodies", async () => {
+				mode = "blocked"; calls = 0;
+				const result = await invoke(client, `async () => await ${read}`);
+				assert.equal(result.isError, true);
+				assert.equal(calls, 1);
+				assert.match(result.content[0].text, /permission/);
+				assert.doesNotMatch(result.content[0].text, /private forbidden/);
+			});
+			await t.test("retries a Notion-confirmed overload rejection of a write", async () => {
+				mode = "overload-write"; calls = 0; writes = 0;
+				assert.deepEqual((await invoke(client, `async () => await ${write}`)).structuredContent, { result: { created: true } });
+				assert.equal(writes, 2);
+			});
+			await t.test("distinguishes Gmail 403 rate limits from permissions without replaying writes", async () => {
+				const profile = "google.request({ service: 'gmail', method: 'GET', path: '/gmail/v1/users/me/profile' })";
+				mode = "google-rate"; googleCalls = 0;
+				assert.deepEqual((await invoke(client, `async () => await ${profile}`)).structuredContent, { result: { emailAddress: "joe@j1.io" } });
+				assert.equal(googleCalls, 2);
+				mode = "google-permission"; googleCalls = 0;
+				const permission = await invoke(client, `async () => await ${profile}`);
+				assert.equal(permission.isError, true);
+				assert.equal(googleCalls, 1);
+				assert.match(permission.content[0].text, /permission/);
+				assert.doesNotMatch(permission.content[0].text, /private forbidden/);
+				mode = "google-rate-write"; googleCalls = 0;
+				const limitedWrite = await invoke(client, "async () => await google.request({ service: 'gmail', method: 'POST', path: '/gmail/v1/users/me/messages/send', body: { raw: 'test' } })");
+				assert.equal(limitedWrite.isError, true);
+				assert.equal(googleCalls, 1);
+				assert.match(limitedWrite.content[0].text, /rate_limited.*safe_to_replay=false/);
+				mode = "google-invalid"; googleCalls = 0;
+				const malformedWrite = await invoke(client, "async () => await google.request({ service: 'gmail', method: 'POST', path: '/gmail/v1/users/me/messages/send', body: { raw: 'test' } })");
+				assert.equal(malformedWrite.isError, true);
+				assert.equal(googleCalls, 1);
+				assert.match(malformedWrite.content[0].text, /invalid_response.*outcome=succeeded/);
+			});
+			await t.test("retries Browser Run HTTP failures and rejects malformed successful responses", async () => {
+				const success = await invoke(client, "async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/reliability-retry' })");
+				assert.deepEqual(success.structuredContent, { result: "# Retried 3 times" });
+				const invalid = await invoke(client, "async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/reliability-invalid' })");
+				assert.equal(invalid.isError, true);
+				assert.match(invalid.content[0].text, /invalid_response/);
+			});
+			await t.test("does not multiply authentication retries at the outer API layer", async () => {
+				const profile = "google.request({ service: 'gmail', method: 'GET', path: '/gmail/v1/users/me/profile' })";
+				mode = "google-auth-invalidate";
+				await invoke(client, `async () => await ${profile}`);
+				mode = "google-auth-failure"; authCalls = 0; googleCalls = 0;
+				const failed = await invoke(client, `async () => await ${profile}`);
+				assert.equal(failed.isError, true);
+				assert.equal(authCalls, 3);
+				assert.equal(googleCalls, 0);
+				assert.doesNotMatch(failed.content[0].text, /private signed assertion/);
+				mode = "google-auth-recovered";
+				assert.deepEqual((await invoke(client, `async () => await ${profile}`)).structuredContent, { result: { emailAddress: "joe@j1.io" } });
+			});
+			await t.test("retries one failed request rather than repeating earlier side effects", async () => {
+				mode = "sequence"; calls = 0; writes = 0;
+				assert.deepEqual((await invoke(client, `async () => { await ${write}; return await ${read}; }`)).structuredContent, { result: { ok: true } });
+				assert.equal(writes, 1);
+				assert.equal(calls, 3);
+			});
+			await t.test("shares the provider concurrency gate across concurrent MCP calls", async () => {
+				mode = "parallel"; calls = 0; peak = 0;
+				const code = `async () => await Promise.all(Array.from({ length: 6 }, () => ${read}))`;
+				const results = await Promise.all([invoke(client, code), invoke(client, code)]);
+				assert.ok(results.every(result => result.isError === undefined));
+				assert.equal(calls, 12);
+				assert.equal(peak, 4);
+			});
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
 function createConciergeHarness(debugEnabled, secrets = {}) {
 	return createTestHarness({
 		root: ROOT,
@@ -785,6 +1043,13 @@ function createConciergeHarness(debugEnabled, secrets = {}) {
 					compatibility_date: "2026-07-15",
 					main: "./tests/fixtures/browser-worker.mjs",
 					name: "browser-mock",
+				},
+			},
+			{
+				config: {
+					compatibility_date: "2026-07-15",
+					main: "./tests/fixtures/reliability-worker.mjs",
+					name: "reliability-test",
 				},
 			},
 		],

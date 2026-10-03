@@ -1,5 +1,6 @@
 import { CodemodeConnector, type ConnectorTools } from "@cloudflare/codemode";
 import { GoogleWorkspaceAuth } from "./auth";
+import { ConnectorRequests, createApiUrl, isRecord, isScalar, type ApiFailure, type QueryValue } from "../../connector-requests";
 
 const SERVICES = {
 	gmail: {
@@ -13,17 +14,16 @@ const SERVICES = {
 	},
 } as const;
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"];
-type Scalar = boolean | number | string;
 type GoogleRequest = {
 	service: keyof typeof SERVICES;
 	method: string;
 	path: string;
-	query?: Record<string, Scalar | Scalar[]>;
+	query?: Record<string, QueryValue>;
 	body?: unknown;
 };
 
 export class GoogleConnector extends CodemodeConnector<Env> {
-	constructor(ctx: DurableObjectState, env: Env, private readonly auth: GoogleWorkspaceAuth) {
+	constructor(ctx: DurableObjectState, env: Env, private readonly auth: GoogleWorkspaceAuth, private readonly requests: ConnectorRequests) {
 		super(ctx, env);
 	}
 
@@ -73,48 +73,23 @@ export class GoogleConnector extends CodemodeConnector<Env> {
 
 	private async request(options: GoogleRequest) {
 		const service = SERVICES[options.service];
-		const url = new URL(options.path, service.origin);
-		if (
-			url.origin !== service.origin || !url.pathname.startsWith(service.pathPrefix) ||
-			url.search || url.hash || /%(?:2f|5c|2e)/i.test(url.pathname)
-		) {
-			throw new Error(`Google ${options.service} paths must begin with ${service.pathPrefix} and stay on the API origin.`);
-		}
-		for (const [key, value] of Object.entries(options.query ?? {})) {
-			if (["access_token", "oauth_token", "key"].includes(key)) {
-				throw new Error("Google API credentials are managed server-side.");
-			}
-			for (const item of Array.isArray(value) ? value : [value]) {
-				url.searchParams.append(key, String(item));
-			}
-		}
+		const url = createApiUrl(service.origin, service.pathPrefix, options.path, options.query);
 		if (options.method === "GET" && options.body !== undefined) {
 			throw new Error("GET requests cannot include a body.");
 		}
-		const token = await this.auth.accessToken(service.scopes);
-		const response = await fetch(url, {
+		return this.requests.request({
+			connector: "Google",
+			operation: options.service,
+			readOnly: options.method === "GET",
+			url,
 			method: options.method,
-			headers: {
-				Accept: "application/json",
-				Authorization: `Bearer ${token}`,
-				"Content-Type": "application/json",
-			},
+			headers: async () => ({ Authorization: `Bearer ${await this.auth.accessToken(service.scopes)}` }),
 			body: options.body === undefined ? undefined : JSON.stringify(options.body),
-			redirect: "manual",
-			signal: AbortSignal.timeout(30_000),
+			onResponse: (response, headers) => {
+				if (response.status === 401) this.auth.invalidate(headers.get("Authorization")!.slice(7));
+			},
+			classifyError: classifyGoogleError,
 		});
-		if (response.status === 401) this.auth.invalidate(token);
-		if (!response.ok) {
-			let payload: unknown;
-			try { payload = await response.json(); } catch { /* Non-JSON gateway errors carry no API details. */ }
-			const message = isRecord(payload) && isRecord(payload.error) && typeof payload.error.message === "string"
-				? payload.error.message.replaceAll(token, "[redacted]").slice(0, 2000)
-				: "";
-			const retryAfter = response.headers.get("Retry-After");
-			throw new Error(`Google ${options.service} API returned HTTP ${response.status}.${message ? ` ${message}` : ""}${retryAfter ? ` Retry-After: ${retryAfter}s.` : ""}`);
-		}
-		const text = await response.text();
-		return text ? JSON.parse(text) as unknown : null;
 	}
 }
 
@@ -139,10 +114,13 @@ function readRequest(args: unknown): GoogleRequest {
 	return { service: service as keyof typeof SERVICES, method, path, query: query as GoogleRequest["query"], body };
 }
 
-function isScalar(value: unknown): value is Scalar {
-	return typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value));
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return Boolean(value && typeof value === "object" && !Array.isArray(value));
+function classifyGoogleError(status: number, payload: unknown): ApiFailure {
+	const error = isRecord(payload) && isRecord(payload.error) ? payload.error : {};
+	const reasons = Array.isArray(error.errors) ? error.errors.filter(isRecord).map((entry) => entry.reason) : [];
+	const rateLimited = status === 429 || (status === 403 && reasons.some((reason) => reason === "rateLimitExceeded" || reason === "userRateLimitExceeded"));
+	return {
+		message: typeof error.message === "string" ? error.message : undefined,
+		code: typeof reasons[0] === "string" ? reasons[0] : undefined,
+		...(rateLimited ? { category: "rate_limited", retryable: true } as const : {}),
+	};
 }

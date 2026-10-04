@@ -51,7 +51,11 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 			fetch: (input, init) => worker.fetch(input, init),
 		}));
 		assert.equal(client.getNegotiatedProtocolVersion(), "2026-07-28");
-		assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name), ["code"]);
+		const tools = (await client.listTools()).tools;
+		assert.deepEqual(tools.map((tool) => tool.name), ["code"]);
+		assert.match(tools[0].description, /- `maps`.*Routes API/);
+		assert.match(tools[0].description, /- `google`.*Gmail/);
+		assert.match(tools[0].description, /search for `maps directions`/);
 		const result = await client.callTool({ name: "code", arguments: {
 			code: "async () => ({ sum: 2 + 2, matches: await codemode.search('request') })",
 		} });

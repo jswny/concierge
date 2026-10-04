@@ -534,6 +534,16 @@ test("serves the code tool over the modern MCP protocol", async () => {
 			const [tool] = tools;
 			assert.equal(tool.name, "code");
 			assert.match(tool.description ?? "", /codemode\.search.*connector method names/s);
+			const connectorSection = (tool.description ?? "").split("## Available connectors\n")[1]?.split("\n## ")[0];
+			assert.ok(connectorSection);
+			for (const name of ["cloudflare", "notion", "google", "maps"]) {
+				assert.match(connectorSection, new RegExp("- `" + name + "`"));
+			}
+			assert.match(connectorSection, /Routes API/);
+			assert.match(tool.description ?? "", /Search first for the task capability/);
+			assert.match(tool.description ?? "", /Prefer a purpose-specific API connector/);
+			assert.match(tool.description ?? "", /search for `maps directions`/);
+			assert.doesNotMatch(tool.description ?? "", /to read reviews from a Google Maps page|Do not search for `Google Maps reviews`/);
 			assert.match(tool.description ?? "", /failed code invocation does not undo earlier connector calls/);
 			assert.match(tool.description ?? "", /outcome=unknown/);
 			assert.deepEqual(tool.annotations, {
@@ -549,6 +559,11 @@ test("serves the code tool over the modern MCP protocol", async () => {
 			});
 			assert.equal(discovery.isError, undefined);
 			assert.equal(discovery.structuredContent.result.results[0].path, "google.request");
+			for (const query of ["maps directions", "google maps", "route distance", "business ratings"]) {
+				const matches = await client.callTool({ name: "code", arguments: { code: `async () => await codemode.search(${JSON.stringify(query)})` } });
+				assert.equal(matches.isError, undefined);
+				assert.equal(matches.structuredContent.result.results[0].path, "maps.request", query);
+			}
 
 			const result = await client.callTool({
 				name: "code",

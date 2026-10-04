@@ -58,7 +58,7 @@ function createConciergeServer(
 			google:
 				"Call Google Workspace APIs as joe@j1.io through google.request. Gmail email and settings are enabled; consult official API documentation for request details.",
 			maps:
-				"Search public businesses and places, and read ratings, rating counts, hours, and details through maps.request using Places API (New). Consult official API documentation; pass field masks in query.fields. Requests may incur charges; select only needed fields and preserve Google Maps attribution.",
+				"Use maps.request for public businesses, places, ratings, hours, reviews, directions, travel times, distances, and route matrices through Places API (New) and Routes API. Prefer these APIs over reading Google Maps webpages for supported tasks. Consult official API documentation; pass field masks in query.fields. Requests may incur charges; select only needed fields and preserve Google Maps attribution.",
 			notion:
 				"Call the Notion REST API through notion.request with the server-side NOTION_TOKEN. Consult the current official Notion API documentation for request details.",
 		},
@@ -107,8 +107,10 @@ function createConciergeCodeToolDescription(defaultDescription: string) {
 		"Tool Discovery",
 		[
 			"`codemode.search` searches connector method names and descriptions; it does not search the web or external content.",
-			"Search with only a short method capability, such as `read webpage markdown`. Do not include the target site, URL, resource name, or desired content in the query.",
-			"Example: to read reviews from a Google Maps page, search for `read webpage markdown`, describe the matched method, then pass the Google Maps URL to that method. Do not search for `Google Maps reviews`.",
+			"Search first for the task capability, such as `maps directions`, `business ratings`, or `gmail email`. Platform names help identify the right connector; do not include actual URLs, specific resource names, or search terms for external content.",
+			"Prefer a purpose-specific API connector over webpage reading when it supports the task. Do not choose an implementation such as browser rendering before discovering the available task capabilities.",
+			"Example: for directions between places, search for `maps directions`, describe `maps.request`, then call the Routes API. For business ratings or reviews, search for `business ratings` and use the Places API.",
+			"For reading a general webpage with no suitable API connector, search for `read webpage markdown`, describe the matched method, then pass the URL to it.",
 			"If discovery returns no results, retry with a shorter, more general capability phrase before concluding that no connector method exists.",
 		].join("\n"),
 	);

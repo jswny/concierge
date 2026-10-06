@@ -625,9 +625,94 @@ test("calls Browser Run through the Cloudflare connector", async () => {
 			},
 		});
 
-		assert.deepEqual(result.structuredContent, {
-			result: "# Mock webpage\nURL: https://example.com/test\nWait: networkidle0",
-		});
+		assert.equal(result.isError, undefined);
+		const page = result.structuredContent.result;
+		assert.equal(page.markdown, "# Mock webpage\nURL: https://example.com/test\nWait: networkidle2\nSelector: none\nSelector timeout: none");
+		assert.equal(page.requestedUrl, "https://example.com/test");
+		assert.equal(page.finalUrl, "https://example.com/final");
+		assert.equal(page.title, "Mock webpage");
+		assert.equal(page.status, 200);
+		assert.ok(Number.isFinite(Date.parse(page.retrievedAt)));
+		assert.equal(page.contentHash, createHash("sha256").update(page.markdown).digest("hex"));
+		assert.equal(page.offset, 0);
+		assert.equal(page.totalChars, page.markdown.length);
+		assert.equal(page.nextOffset, null);
+		assert.equal(page.truncated, false);
+		assert.doesNotMatch(JSON.stringify(result), /private-test-cookie|set-cookie/);
+		assert.deepEqual(JSON.parse(result.content[0].text), page);
+	});
+});
+
+test("uses bounded browser readiness overrides and represents missing metadata honestly", async () => {
+	await withMcpClient(undefined, async (client) => {
+		const invoke = (args) => client.callTool({ name: "code", arguments: { code: `async () => await cloudflare.read_webpage_as_markdown(${JSON.stringify(args)})` } });
+		for (const waitUntil of ["domcontentloaded", "load", "networkidle0", "networkidle2"]) {
+			const result = await invoke({ url: "https://example.com/test", waitUntil, waitForSelector: { selector: "#ready", timeout: 500 } });
+			assert.equal(result.isError, undefined);
+			assert.match(result.structuredContent.result.markdown, new RegExp(`Wait: ${waitUntil}\\nSelector: #ready\\nSelector timeout: 500`));
+		}
+		const defaultTimeout = await invoke({ url: "https://example.com/test", waitForSelector: { selector: "main" } });
+		assert.match(defaultTimeout.structuredContent.result.markdown, /Selector timeout: 10000/);
+		const missing = await invoke({ url: "https://example.com/no-metadata" });
+		assert.equal(missing.isError, undefined);
+		for (const key of ["finalUrl", "title", "status"]) assert.equal(missing.structuredContent.result[key], null);
+	});
+});
+
+test("rejects empty, HTTP-error and recognizable gated browser pages without leaking their bodies", async () => {
+	await withMcpClient(undefined, async (client) => {
+		for (const [path, message] of [["empty", /no readable Markdown/], ["not-found", /HTTP 404/], ["challenge", /require login or a browser challenge/], ["login", /require login or a browser challenge/], ["gate-message", /require login or a browser challenge/]]) {
+			const result = await client.callTool({ name: "code", arguments: { code: `async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/${path}' })` } });
+			assert.equal(result.isError, true, path);
+			assert.match(result.content[0].text, message);
+			assert.doesNotMatch(JSON.stringify(result), /Private upstream error|private-test-cookie/);
+		}
+		const article = await client.callTool({ name: "code", arguments: { code: "async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/login-article' })" } });
+		assert.equal(article.isError, undefined);
+	});
+});
+
+test("paginates fresh browser reads without losing content or silently mixing versions", async () => {
+	await withMcpClient(undefined, async (client) => {
+		const invoke = (args) => client.callTool({ name: "code", arguments: { code: `async () => await cloudflare.read_webpage_as_markdown(${JSON.stringify(args)})` } });
+		const url = "https://example.com/long";
+		let offset = 0;
+		let contentHash;
+		let text = "";
+		do {
+			const result = await invoke({ url, offset, contentHash });
+			assert.equal(result.isError, undefined);
+			assert.doesNotMatch(JSON.stringify(result), /--- TRUNCATED ---/);
+			const page = result.structuredContent.result;
+			assert.equal(page.offset, offset);
+			assert.equal(page.totalChars, 30_000);
+			assert.equal(page.truncated, true);
+			assert.equal(page.contentHash, createHash("sha256").update("0123456789".repeat(3_000)).digest("hex"));
+			text += page.markdown;
+			offset = page.nextOffset;
+			contentHash = page.contentHash;
+		} while (offset !== null);
+		assert.equal(text, "0123456789".repeat(3_000));
+		for (const args of [{ url, offset: 1 }, { url, offset: 30_000, contentHash }, { url, contentHash: "0".repeat(64) }]) {
+			assert.equal((await invoke(args)).isError, true);
+		}
+		const changedUrl = "https://example.com/changing";
+		const first = (await invoke({ url: changedUrl, maxChars: 3 })).structuredContent.result;
+		const changed = await invoke({ url: changedUrl, offset: first.nextOffset, contentHash: first.contentHash });
+		assert.equal(changed.isError, true);
+		assert.match(changed.content[0].text, /changed between reads/);
+		const escaped = await invoke({ url: "https://example.com/escaped" });
+		assert.equal(escaped.isError, undefined);
+		assert.doesNotMatch(JSON.stringify(escaped), /--- TRUNCATED ---/);
+		assert.equal(escaped.structuredContent.result.nextOffset, escaped.structuredContent.result.markdown.length);
+		const oversized = await invoke({ url: "https://example.com/oversized-metadata" });
+		assert.equal(oversized.isError, true);
+		assert.match(oversized.content[0].text, /source metadata exceeds the output budget/);
+		const emoji = await invoke({ url: "https://example.com/unicode", maxChars: 2 });
+		assert.equal(emoji.structuredContent.result.markdown, "\uD83D\uDE00");
+		assert.equal(emoji.structuredContent.result.nextOffset, 2);
+		const rest = await invoke({ url: "https://example.com/unicode", offset: 2, contentHash: emoji.structuredContent.result.contentHash });
+		assert.equal(rest.structuredContent.result.markdown, "xyz");
 	});
 });
 
@@ -640,7 +725,11 @@ test("exposes generated connector contracts and validates browser inputs", async
 		assert.match(JSON.stringify(docs.structuredContent.result.notion), /GET.*POST.*PATCH.*DELETE/s);
 		assert.match(JSON.stringify(docs.structuredContent.result.google), /gmail/);
 		assert.match(JSON.stringify(docs.structuredContent.result.browser), /url/);
-		for (const args of [null, {}, { url: "" }, { url: "not-a-url" }, { url: "ftp://example.com" }, { url: "https://user:password@example.com" }, { url: "https://example.com", extra: true }]) {
+		for (const args of [null, {}, { url: "" }, { url: "not-a-url" }, { url: "ftp://example.com" }, { url: "https://user:password@example.com" }, { url: "https://example.com", extra: true }, ...[
+			{ waitUntil: "never" }, { waitForSelector: { selector: "" } }, { waitForSelector: { selector: "main", timeout: 10_001 } },
+			{ waitForSelector: { selector: "main", hidden: true } }, { offset: -1 }, { offset: 0.5 }, { maxChars: 0 }, { maxChars: 1 }, { maxChars: 12_001 },
+			{ contentHash: "invalid" }, { cookies: [] }, { setExtraHTTPHeaders: {} }, { cacheTTL: 60 }, { bestAttempt: true },
+		].map((args) => ({ url: "https://example.com", ...args }))]) {
 			const result = await client.callTool({ name: "code", arguments: {
 				code: `async () => await cloudflare.read_webpage_as_markdown(${JSON.stringify(args)})`,
 			} });
@@ -1321,7 +1410,7 @@ test("applies shared reliability to real MCP connector calls without replaying C
 			});
 			await t.test("retries Browser Run HTTP failures and rejects malformed successful responses", async () => {
 				const success = await invoke(client, "async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/reliability-retry' })");
-				assert.deepEqual(success.structuredContent, { result: "# Retried 3 times" });
+				assert.equal(success.structuredContent.result.markdown, "# Retried 3 times");
 				const invalid = await invoke(client, "async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/reliability-invalid' })");
 				assert.equal(invalid.isError, true);
 				assert.match(invalid.content[0].text, /invalid_response/);

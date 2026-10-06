@@ -61,7 +61,14 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		} });
 		assert.equal(result.isError, undefined);
 		assert.equal(result.structuredContent.result.sum, 4);
-		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["google.request", "maps.request", "notion.request"]);
+		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["cloudflare.read_webpage_as_markdown", "google.request", "maps.request", "notion.request"]);
+		const page = await client.callTool({ name: "code", arguments: {
+			code: "async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/test' })",
+		} });
+		assert.equal(page.isError, undefined);
+		assert.equal(page.structuredContent.result.status, 200);
+		assert.equal(page.structuredContent.result.finalUrl, "https://example.com/final");
+		assert.match(page.structuredContent.result.markdown, /Wait: networkidle2/);
 	} finally {
 		await client.close();
 		await harness.close();

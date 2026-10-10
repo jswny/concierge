@@ -15,12 +15,12 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@cloudflare/codemode": "0.5.2",
+    "@cloudflare/codemode": "0.5.3",
     "@cloudflare/workers-oauth-provider": "1.2.3",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@modelcontextprotocol/server": "2.0.0",
-    "agents": "0.24.0",
+    "agents": "0.28.0",
     "jose": "6.2.12",
     "oauth4webapi": "3.8.8",
     "zod": "^4.4.3"

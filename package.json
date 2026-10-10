@@ -17,13 +17,20 @@
   "dependencies": {
     "@cloudflare/codemode": "0.5.3",
     "@cloudflare/workers-oauth-provider": "1.2.3",
-    "@modelcontextprotocol/client": "2.0.0",
-    "@modelcontextprotocol/sdk": "1.30.0",
-    "@modelcontextprotocol/server": "2.0.0",
+    "@modelcontextprotocol/client": "2.3.1",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "@modelcontextprotocol/server": "2.3.1",
     "agents": "0.28.0",
     "jose": "6.2.12",
     "oauth4webapi": "3.8.8",
     "zod": "^4.4.3"
+  },
+  "overrides": {
+    "agents@0.28.0": {
+      "@modelcontextprotocol/client": "$@modelcontextprotocol/client",
+      "@modelcontextprotocol/sdk": "$@modelcontextprotocol/sdk",
+      "@modelcontextprotocol/server": "$@modelcontextprotocol/server"
+    }
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.63.1",

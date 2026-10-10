@@ -73,6 +73,9 @@ test("advertises CIMD without dynamic client registration", async () => {
 	assert.equal(Object.hasOwn(authorizationMetadata, "registration_endpoint"), false);
 	assert.equal(authorizationMetadata.authorization_endpoint, "https://concierge.j1.io/authorize");
 	assert.equal(authorizationMetadata.token_endpoint, "https://concierge.j1.io/token");
+	assert.ok(authorizationMetadata.token_endpoint_auth_methods_supported.includes("none"));
+	assert.ok(authorizationMetadata.token_endpoint_auth_methods_supported.includes("private_key_jwt"));
+	assert.deepEqual(authorizationMetadata.token_endpoint_auth_signing_alg_values_supported, ["RS256", "ES256"]);
 
 	const resourceResponse = await productionServer.getWorker("concierge").fetch(
 		"https://concierge.j1.io/.well-known/oauth-protected-resource/mcp",
@@ -83,10 +86,31 @@ test("advertises CIMD without dynamic client registration", async () => {
 	assert.deepEqual(resourceMetadata.bearer_methods_supported, ["header"]);
 });
 
-test("authorizes a CIMD client through Access and refreshes its MCP token", async () => {
-	const clientId = "https://client.example/metadata.json";
+test("authorizes a CIMD public client through Access and refreshes its MCP token", () => testCimdAuthorization("none"));
+test("authenticates a CIMD private_key_jwt client and rejects invalid or replayed assertions", () => testCimdAuthorization("private_key_jwt"));
+test("allows CIMD authentication choices without downgrading invalid assertions to none", () => testCimdAuthorization("choice"));
+
+async function testCimdAuthorization(authMethod) {
+	const signedClient = authMethod !== "none";
+	const clientId = `https://client.example/${authMethod}.json`;
 	const redirectUri = "https://client.example/callback";
 	const verifier = randomBytes(32).toString("base64url");
+	const clientKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+	const tokenEndpoint = "https://concierge.j1.io/token";
+	function clientAssertion(claims = {}, key = clientKeys.privateKey) {
+		const now = Math.floor(Date.now() / 1000);
+		const data = [{ alg: "RS256", kid: "client-key" }, {
+			iss: clientId, sub: clientId, aud: tokenEndpoint,
+			iat: now, exp: now + 300, jti: randomBytes(16).toString("hex"), ...claims,
+		}].map((part) => Buffer.from(JSON.stringify(part)).toString("base64url")).join(".");
+		return `${data}.${sign("RSA-SHA256", Buffer.from(data), key).toString("base64url")}`;
+	}
+	function clientAuthentication(assertion) {
+		return signedClient ? {
+			client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+			client_assertion: assertion,
+		} : { client_secret: "", client_assertion_type: "", client_assertion: "" };
+	}
 	const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 	const header = Buffer.from(JSON.stringify({ alg: "RS256", kid: "test-key" })).toString("base64url");
 	const claims = Buffer.from(JSON.stringify({
@@ -105,13 +129,18 @@ test("authorizes a CIMD client through Access and refreshes its MCP token", asyn
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
 		if (request.url === clientId) {
+			assert.match(request.headers.get("User-Agent") ?? "", /^workers-oauth-provider\//);
 			return Response.json({
 				client_id: clientId,
 				client_name: "Test MCP Client",
 				grant_types: ["authorization_code", "refresh_token"],
 				redirect_uris: [redirectUri, "https://client.example/other-callback"],
 				response_types: ["code"],
-				token_endpoint_auth_method: "none",
+				token_endpoint_auth_method: authMethod === "choice" ? "none" : authMethod,
+				...(authMethod === "choice" ? { token_endpoint_auth_methods_supported: ["none", "private_key_jwt"] } : {}),
+				...(signedClient ? {
+					jwks: { keys: [{ ...clientKeys.publicKey.export({ format: "jwk" }), kid: "client-key", alg: "RS256", use: "sig" }] },
+				} : {}),
 			});
 		}
 		if (request.url === TEST_SECRETS.ACCESS_TOKEN_URL) {
@@ -218,27 +247,57 @@ test("authorizes a CIMD client through Access and refreshes its MCP token", asyn
 		const clientCallback = new URL(callback.headers.get("Location"));
 		assert.equal(clientCallback.origin, "https://client.example");
 		assert.equal(clientCallback.searchParams.get("state"), "test-client-state");
-		const exchange = await worker.fetch("https://concierge.j1.io/token", {
+		const exchangeBody = {
+			client_id: clientId,
+			code: clientCallback.searchParams.get("code"),
+			code_verifier: verifier,
+			grant_type: "authorization_code",
+			redirect_uri: redirectUri,
+			resource: "https://concierge.j1.io/mcp",
+		};
+		if (signedClient) {
+			for (const assertion of [
+				...(authMethod === "private_key_jwt" ? [undefined] : []),
+				clientAssertion({ aud: "https://other.example/token" }),
+				clientAssertion({ sub: "https://other.example/client" }),
+				clientAssertion({ exp: Math.floor(Date.now() / 1000) - 120 }),
+				clientAssertion({}, privateKey),
+			]) {
+				const rejected = await worker.fetch(tokenEndpoint, {
+					method: "POST",
+					body: new URLSearchParams({ ...exchangeBody, ...(assertion ? clientAuthentication(assertion) : {}) }),
+				});
+				assert.equal(rejected.status, 401);
+				assert.equal((await rejected.json()).error, "invalid_client");
+			}
+		}
+		const assertion = clientAssertion();
+		const exchange = await worker.fetch(tokenEndpoint, {
 			method: "POST",
-			body: new URLSearchParams({
-				client_id: clientId,
-				code: clientCallback.searchParams.get("code"),
-				code_verifier: verifier,
-				grant_type: "authorization_code",
-				redirect_uri: redirectUri,
-				resource: "https://concierge.j1.io/mcp",
-			}),
+			body: new URLSearchParams({ ...exchangeBody, ...clientAuthentication(assertion) }),
 		});
 		assert.equal(exchange.status, 200);
 		const tokens = await exchange.json();
 		assert.equal(typeof tokens.access_token, "string");
 		assert.equal(typeof tokens.refresh_token, "string");
+		if (signedClient) {
+			const replay = await worker.fetch(tokenEndpoint, {
+				method: "POST",
+				body: new URLSearchParams({
+					client_id: clientId, grant_type: "refresh_token", refresh_token: tokens.refresh_token,
+					...clientAuthentication(assertion),
+				}),
+			});
+			assert.equal(replay.status, 401);
+			assert.equal((await replay.json()).error, "invalid_client");
+		}
 		const refresh = await worker.fetch("https://concierge.j1.io/token", {
 			method: "POST",
 			body: new URLSearchParams({
 				client_id: clientId,
 				grant_type: "refresh_token",
 				refresh_token: tokens.refresh_token,
+				...clientAuthentication(clientAssertion()),
 			}),
 		});
 		assert.equal(refresh.status, 200);
@@ -257,7 +316,7 @@ test("authorizes a CIMD client through Access and refreshes its MCP token", asyn
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
-});
+}
 
 test("validates Access OAuth responses and ID tokens before issuing MCP authorization codes", async (t) => {
 	const clientId = "https://identity-client.example/metadata.json";

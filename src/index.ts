@@ -17,6 +17,7 @@ import { MapsConnector } from "./integrations/maps/connector";
 import { NotionConnector } from "./notion-connector";
 import { ConnectorRequests } from "./connector-requests";
 import { boundMcpRequest, MAX_CODE_CHARS } from "./mcp-requests";
+import { observeCodeExecution } from "./code-execution";
 
 export { CodemodeRuntime } from "@cloudflare/codemode";
 
@@ -85,7 +86,7 @@ function createConciergeServer(
 				openWorldHint: true,
 			},
 		},
-		async ({ code }) => formatCodeToolOutput(await runtime.execute({ code })),
+		async ({ code }) => formatCodeToolOutput(await observeCodeExecution(() => runtime.execute({ code }))),
 	);
 
 	return server;

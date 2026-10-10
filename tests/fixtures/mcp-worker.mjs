@@ -1,8 +1,30 @@
 import { boundMcpRequest } from "../../src/mcp-requests.ts";
+import { observeCodeExecution } from "../../src/code-execution.ts";
 
 export default {
 	async fetch(request) {
 		const options = await request.json();
+		if (options.action === "telemetry") {
+			const logs = [];
+			let executions = 0;
+			const originalLog = console.log;
+			console.log = (message) => {
+				if (options.loggingFailure) throw new Error("test logging failure");
+				logs.push(JSON.parse(message));
+			};
+			try {
+				const result = await observeCodeExecution(async () => {
+					executions++;
+					if (options.throw) throw new Error("private exception must not be logged");
+					return options.output;
+				});
+				return Response.json({ result, sameReference: result === options.output, logs, executions });
+			} catch (error) {
+				return Response.json({ error: error.message, logs, executions });
+			} finally {
+				console.log = originalLog;
+			}
+		}
 		let cancelled = false;
 		let chunksRead = 0;
 		const headers = new Headers({ "X-Test-Header": "preserved" });

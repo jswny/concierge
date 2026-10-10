@@ -724,6 +724,72 @@ test("preserves structured large results when Code Mode truncates them", async (
 	});
 });
 
+test("records metadata-only Code Mode telemetry for success and pre-connector failures", async () => {
+	debugServer.clearLogs();
+	await withMcpClient(undefined, async (client) => {
+		for (const [code, isError] of [
+			['async () => "private returned content"', undefined],
+			['async () => { throw new Error("private exception content"); }', true],
+			['async () => { invalid syntax private_source_marker }', true],
+			["async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/test' })", undefined],
+		]) {
+			const result = await client.callTool({ name: "code", arguments: { code } });
+			assert.equal(result.isError, isError);
+		}
+	});
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	const logs = debugServer.getLogs();
+	const events = logs.flatMap((log) => log.message ?? [])
+		.filter((message) => typeof message === "string" && message.startsWith('{"event":"code_execution"'))
+		.map((message) => JSON.parse(message));
+	assert.equal(events.length, 4, JSON.stringify(logs));
+	assert.deepEqual(events.map((event) => event.status), ["completed", "error", "error", "completed"]);
+	assert.deepEqual(events.map((event) => event.connectorCalls), [0, 0, 0, 1]);
+	for (const event of events) {
+		assert.deepEqual(Object.keys(event).sort(), ["connectorCalls", "durationMs", "event", "status"]);
+		assert.ok(Number.isFinite(event.durationMs) && event.durationMs >= 0);
+	}
+	assert.doesNotMatch(JSON.stringify(events), /private|async|throw|syntax/);
+});
+
+test("keeps Code Mode outcomes unchanged when telemetry fails", async () => {
+	const fixture = debugServer.getWorker("mcp-infrastructure-test");
+	const run = async (options) => (await fixture.fetch("/", {
+		method: "POST", body: JSON.stringify({ action: "telemetry", ...options }),
+	})).json();
+	for (const status of ["completed", "error", "paused"]) {
+		const output = {
+			status, executionId: "private execution id",
+			result: { secret: "private result" }, error: "private error", logs: ["private sandbox log"],
+			calls: [{ path: "private method", args: { token: "private token" } }],
+		};
+		for (const loggingFailure of [false, true]) {
+			const result = await run({ output, loggingFailure });
+			assert.equal(result.sameReference, true);
+			assert.deepEqual(result.result, output);
+			assert.equal(result.executions, 1);
+			assert.equal(result.logs.length, loggingFailure ? 0 : 1);
+			if (!loggingFailure) {
+				assert.equal(result.logs[0].status, status);
+				assert.equal(result.logs[0].connectorCalls, 1);
+				assert.deepEqual(Object.keys(result.logs[0]).sort(), ["connectorCalls", "durationMs", "event", "status"]);
+				assert.doesNotMatch(JSON.stringify(result.logs), /private|token|args|result|executionId/);
+			}
+		}
+	}
+	for (const loggingFailure of [false, true]) {
+		const result = await run({ throw: true, loggingFailure });
+		assert.equal(result.error, "private exception must not be logged");
+		assert.equal(result.executions, 1);
+		assert.equal(result.logs.length, loggingFailure ? 0 : 1);
+		if (!loggingFailure) {
+			assert.equal(result.logs[0].status, "exception");
+			assert.equal(Object.hasOwn(result.logs[0], "connectorCalls"), false);
+			assert.doesNotMatch(JSON.stringify(result.logs), /private/);
+		}
+	}
+});
+
 test("keeps record identity, status and pagination usable in truncated list results", async () => {
 	await withMcpClient(undefined, async (client) => {
 		const result = await client.callTool({ name: "code", arguments: {

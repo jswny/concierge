@@ -529,6 +529,7 @@ test("serves the code tool over the modern MCP protocol", async () => {
 		},
 		async (client) => {
 			assert.equal(client.getNegotiatedProtocolVersion(), MODERN_PROTOCOL_VERSION);
+			assert.equal(client.getServerCapabilities().tools.listChanged, false);
 			const { tools } = await client.listTools();
 			assert.equal(tools.length, 1);
 			const [tool] = tools;
@@ -585,6 +586,7 @@ test("serves the code tool over the modern MCP protocol", async () => {
 test("retains legacy MCP compatibility", async () => {
 	await withMcpClient(undefined, async (client) => {
 		assert.equal(client.getNegotiatedProtocolVersion(), LEGACY_PROTOCOL_VERSION);
+		assert.equal(client.getServerCapabilities().tools.listChanged, false);
 		const { tools } = await client.listTools();
 		assert.deepEqual(
 			tools.map((tool) => tool.name),
@@ -597,6 +599,50 @@ test("retains legacy MCP compatibility", async () => {
 		});
 		assert.deepEqual(result.structuredContent, { result: "legacy" });
 	});
+});
+
+test("does not promise unsupported change notifications to modern subscribers", async () => {
+	for (const notifications of [
+		{ toolsListChanged: true },
+		{ promptsListChanged: true },
+		{ resourcesListChanged: true },
+		{ resourceSubscriptions: ["file:///example"] },
+		{},
+	]) {
+		const response = await debugServer.getWorker("concierge").fetch(debugMcpUrl, {
+			method: "POST",
+			headers: {
+				Accept: "application/json, text/event-stream",
+				"Content-Type": "application/json",
+				"MCP-Protocol-Version": MODERN_PROTOCOL_VERSION,
+				"Mcp-Method": "subscriptions/listen",
+			},
+			body: JSON.stringify({
+				jsonrpc: "2.0", id: 7, method: "subscriptions/listen",
+				params: {
+					notifications,
+					_meta: {
+						"io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+						"io.modelcontextprotocol/clientInfo": { name: "concierge-integration-test", version: "1.0.0" },
+						"io.modelcontextprotocol/clientCapabilities": {},
+					},
+				},
+			}),
+		});
+		assert.equal(response.status, 200);
+		assert.match(response.headers.get("Content-Type"), /text\/event-stream/);
+		const reader = response.body.getReader();
+		try {
+			const { value } = await reader.read();
+			const frame = new TextDecoder().decode(value).split("\n").find((line) => line.startsWith("data:"));
+			assert.ok(frame);
+			const acknowledgment = JSON.parse(frame.slice(5));
+			assert.equal(acknowledgment.method, "notifications/subscriptions/acknowledged");
+			assert.deepEqual(acknowledgment.params.notifications, {});
+		} finally {
+			await reader.cancel();
+		}
+	}
 });
 
 test("preserves structured large results when Code Mode truncates them", async () => {

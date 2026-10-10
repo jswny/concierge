@@ -41,6 +41,7 @@ function createConciergeServer(
 		name: "Concierge MCP",
 		version: "1.0.0",
 	});
+	server.server.registerCapabilities({ tools: { listChanged: false } });
 	const runtime = createCodemodeRuntime({
 		connectors: [
 			new CloudflareConnector(ctx, env, requests),

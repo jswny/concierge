@@ -607,6 +607,8 @@ test("serves the code tool over the modern MCP protocol", async () => {
 			assert.doesNotMatch(tool.description ?? "", /to read reviews from a Google Maps page|Do not search for `Google Maps reviews`/);
 			assert.match(tool.description ?? "", /failed code invocation does not undo earlier connector calls/);
 			assert.match(tool.description ?? "", /outcome=unknown/);
+			assert.match(tool.description ?? "", /use native API pagination inside the function/);
+			assert.match(tool.description ?? "", /Do not treat truncated output as complete or reuse a truncated identifier or cursor/);
 			assert.deepEqual(tool.annotations, {
 				destructiveHint: true,
 				idempotentHint: false,
@@ -719,6 +721,50 @@ test("preserves structured large results when Code Mode truncates them", async (
 		assert.match(result.structuredContent.result.body, /--- TRUNCATED ---/);
 		assert.ok(result.structuredContent.result.body.length < 100000);
 		assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent.result);
+	});
+});
+
+test("keeps record identity, status and pagination usable in truncated list results", async () => {
+	await withMcpClient(undefined, async (client) => {
+		const result = await client.callTool({ name: "code", arguments: {
+			code: `async () => ({
+				items: Array.from({ length: 1000 }, (_, i) => ({ id: "record-" + i, status: i % 2 ? "pending" : "done", body: "x".repeat(1000) })),
+				next_cursor: "next-page-1000", has_more: true
+			})`,
+		} });
+		assert.equal(result.isError, undefined);
+		const page = result.structuredContent.result;
+		assert.equal(page.next_cursor, "next-page-1000");
+		assert.equal(page.has_more, true);
+		assert.ok(JSON.stringify(page).length <= 24_000);
+		assert.match(page.items.at(-1), /--- TRUNCATED ---.*more items/);
+		const records = page.items.slice(0, -1);
+		assert.ok(records.length > 0 && records.length < 1000);
+		for (const [i, record] of records.entries()) {
+			assert.equal(record.id, `record-${i}`);
+			assert.equal(record.status, i % 2 ? "pending" : "done");
+			assert.match(JSON.stringify(record), /--- TRUNCATED ---/);
+		}
+		assert.deepEqual(JSON.parse(result.content[0].text), page);
+	});
+});
+
+test("returns projected native pages unchanged without truncation", async () => {
+	await withMcpClient(undefined, async (client) => {
+		const result = await client.callTool({ name: "code", arguments: {
+			code: `async () => {
+				const page = { items: Array.from({ length: 10 }, (_, i) => ({ id: "record-" + i, status: "done", body: "x".repeat(1000) })), next_cursor: "next-page-10", has_more: true };
+				return { ...page, items: page.items.map(({ id, status }) => ({ id, status })) };
+			}`,
+		} });
+		assert.equal(result.isError, undefined);
+		const expected = {
+			items: Array.from({ length: 10 }, (_, i) => ({ id: `record-${i}`, status: "done" })),
+			next_cursor: "next-page-10", has_more: true,
+		};
+		assert.deepEqual(result.structuredContent.result, expected);
+		assert.deepEqual(JSON.parse(result.content[0].text), expected);
+		assert.doesNotMatch(JSON.stringify(result), /--- TRUNCATED ---/);
 	});
 });
 

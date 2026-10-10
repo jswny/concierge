@@ -124,6 +124,8 @@ function createConciergeCodeToolDescription(defaultDescription: string) {
 		[
 			"The Code Mode result is the single value returned by the async function. Return any value the model should receive for later reasoning; console logs and intermediate values are not returned.",
 			"If multiple values are needed, return one object that contains them, e.g. `return { first, second };`.",
+			"Large return values may be structurally truncated with `--- TRUNCATED ---` markers. Filter, project, or use native API pagination inside the function before returning; keep needed identifiers, status fields, and pagination metadata in the smaller result.",
+			"Do not treat truncated output as complete or reuse a truncated identifier or cursor. Retrieve a smaller result instead; output truncation does not undo any earlier writes.",
 		].join("\n"),
 	);
 	return appendMarkdownSection(

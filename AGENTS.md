@@ -60,6 +60,27 @@ If the application uses Durable Objects or Workflows, refer to the relevant best
 
 ## Project Custom Agent Guidance
 
+### Project Purpose
+
+Concierge provides personal agents, such as ChatGPT and Codex, with pre-authenticated access to the owner's accounts and capabilities that native integrations lack or expose incompletely.
+
+- Keep this a private, personal MCP server, not a multi-user integration platform.
+- Prefer broad programmatic API access over narrowly curated actions when it serves the owner's needs; keep credentials and authorization boundaries server-owned.
+- Supplement native agent integrations rather than duplicate capabilities they already provide adequately.
+- Keep connectors minimal and put shared authentication and reliability behavior in reusable infrastructure.
+
+### Integration Design Principles
+
+- Prefer thin, pre-authenticated adapters to official APIs or platform bindings. Connectors should provide access and provider-specific behavior, not recreate the provider's product or implement agent workflows.
+- Preserve native API paths, query parameters, request bodies, response shapes, pagination, and attribution where practical. Let agents compose calls and process results in Code Mode; transform data only for a concrete security, compatibility, or output-size requirement.
+- Keep discovery compact. Prefer a generic request method for broad REST APIs when a full SDK or generated OpenAPI catalog would add substantial schema noise. Use richer typed methods when they materially improve usability without excessive context cost; models can consult official endpoint documentation.
+- Keep credentials, trusted API origins, scopes, and account identities server-owned. Support writes and deletes when intended; do not impose read-only limitations merely because callers are agents. Additional endpoint restrictions should have an explicit security, provider, or product rationale.
+- Reuse shared request, validation, and authentication infrastructure and proven libraries. Keep only provider-specific contracts, authentication details, and error/replay classification in connectors; avoid parallel retry loops, speculative abstractions, and credential fallbacks.
+- Make capabilities and limitations discoverable in method descriptions, not only connector-level instructions. Keep connector hints and MCP annotations aligned with actual support; distinguish API access from external-content search and interactive browsing.
+- Keep integration tests credential-free and repeatable, covering native request/response behavior, credential isolation, and failure handling. Use a live read-only MCP call to verify real credentials and provider setup when available; do not treat mocks as proof of production access.
+
+### Implementation Guidance
+
 - Preserve the vendored C3 block above unless intentionally refreshing it from a newly generated Create Cloudflare scaffold.
 - Put repo-specific conventions, commands, and deployment notes in this custom section so they survive vendored guidance updates.
 - The project-facing name is `concierge`; the vendored C3 block may still mention the original scaffold command and template name for provenance.

@@ -16,6 +16,7 @@ import { GoogleConnector } from "./integrations/google/connector";
 import { MapsConnector } from "./integrations/maps/connector";
 import { NotionConnector } from "./notion-connector";
 import { ConnectorRequests } from "./connector-requests";
+import { boundMcpRequest, MAX_CODE_CHARS } from "./mcp-requests";
 
 export { CodemodeRuntime } from "@cloudflare/codemode";
 
@@ -70,7 +71,7 @@ function createConciergeServer(
 		{
 			description: createConciergeCodeToolDescription(codeToolDescription),
 			inputSchema: {
-				code: z.string().describe("JavaScript async arrow function to execute."),
+				code: z.string().max(MAX_CODE_CHARS).describe("JavaScript async arrow function to execute."),
 			},
 			outputSchema: {
 				result: z
@@ -200,8 +201,10 @@ function normalizeStructuredResult(result: unknown) {
 	return result === undefined ? null : result;
 }
 
-function handleMcpRequest(request: Request, env: DebugEnv) {
-	return env.CONCIERGE_MCP.getByName("default").fetch(request);
+async function handleMcpRequest(request: Request, env: DebugEnv) {
+	const bounded = await boundMcpRequest(request);
+	if (bounded instanceof Response) return bounded;
+	return env.CONCIERGE_MCP.getByName("default").fetch(bounded);
 }
 
 export class ConciergeMcpRuntime extends DurableObject<DebugEnv> {

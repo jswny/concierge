@@ -520,6 +520,66 @@ test("rejects untrusted MCP Host and Origin headers", async () => {
 	assert.match(await badOriginResponse.text(), /Invalid Origin/);
 });
 
+test("bounds streamed MCP bodies by actual bytes and cancels oversized input", async () => {
+	const limit = 4 * 1024 * 1024;
+	const fixture = debugServer.getWorker("mcp-infrastructure-test");
+	const run = async (options) => (await fixture.fetch("/", { method: "POST", body: JSON.stringify(options) })).json();
+	for (const contentLength of [undefined, 1, "invalid"]) {
+		const result = await run({ chunks: [limit, 1, 10], contentLength });
+		assert.equal(result.status, 413);
+		assert.equal(result.cancelled, true);
+		assert.equal(result.chunksRead, 2);
+		assert.match(result.error.error.message, /4194304 bytes/);
+	}
+	const announced = await run({ chunks: [1], contentLength: limit + 1 });
+	assert.equal(announced.status, 413);
+	assert.equal(announced.cancelled, true);
+	assert.equal(announced.chunksRead, 0);
+	for (const chunks of [[], [1, 2, 3], [limit]]) {
+		const result = await run({ chunks });
+		assert.equal(result.status, 200);
+		assert.equal(result.size, chunks.reduce((a, b) => a + b, 0));
+		assert.equal(result.header, "preserved");
+		assert.equal(result.url, "http://localhost/debug/mcp");
+		assert.equal(result.method, "POST");
+		assert.equal(result.cancelled, false);
+	}
+	assert.equal((await run({ chunks: [1, 2], failAfterChunks: 1 })).error, "test body failure");
+});
+
+test("limits MCP ingress without bypassing OAuth or debug gating", async () => {
+	const options = {
+		method: "POST", headers: { "Content-Type": "application/json" }, body: "x".repeat(4 * 1024 * 1024 + 1),
+	};
+	const response = await debugServer.getWorker("concierge").fetch(debugMcpUrl, options);
+	assert.equal(response.status, 413);
+	assert.equal(response.headers.get("Access-Control-Allow-Origin"), "*");
+	assert.doesNotMatch(JSON.stringify(await response.json()), /xxxxx/);
+	const unicode = await debugServer.getWorker("concierge").fetch(debugMcpUrl, {
+		...options, body: JSON.stringify({ padding: "\u00e9".repeat(2 * 1024 * 1024) }),
+	});
+	assert.equal(unicode.status, 413, "The body limit counts UTF-8 bytes, not characters.");
+	const production = productionServer.getWorker("concierge");
+	assert.equal((await production.fetch("https://concierge.j1.io/mcp", options)).status, 401);
+	assert.equal((await production.fetch("https://concierge.j1.io/debug/mcp", options)).status, 404);
+});
+
+test("advertises and enforces the submitted code length limit", async () => {
+	await withMcpClient(undefined, async (client) => {
+		const limit = 1_000_000;
+		const { tools } = await client.listTools();
+		assert.equal(tools[0].inputSchema.properties.code.maxLength, limit);
+		const prefix = "async () => 1 /*";
+		const boundary = prefix + "x".repeat(limit - prefix.length - 2) + "*/";
+		const accepted = await client.callTool({ name: "code", arguments: { code: boundary } });
+		assert.equal(accepted.isError, undefined, JSON.stringify(accepted));
+		assert.equal(accepted.structuredContent.result, 1);
+		const rejected = await client.callTool({ name: "code", arguments: { code: boundary + " " } });
+		assert.equal(rejected.isError, true);
+		assert.match(rejected.content[0].text, /too_big|Too big|1000000/);
+	});
+});
+
 test("serves the code tool over the modern MCP protocol", async () => {
 	await withMcpClient(
 		{
@@ -1514,6 +1574,13 @@ function createConciergeHarness(debugEnabled, secrets = {}) {
 					compatibility_date: "2026-07-15",
 					main: "./tests/fixtures/reliability-worker.mjs",
 					name: "reliability-test",
+				},
+			},
+			{
+				config: {
+					compatibility_date: "2026-07-15",
+					main: "./tests/fixtures/mcp-worker.mjs",
+					name: "mcp-infrastructure-test",
 				},
 			},
 		],

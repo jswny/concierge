@@ -23,6 +23,7 @@ export default {
 		let cancelled = false;
 		let failuresRemaining = options.failuresBeforeSuccess ?? Infinity;
 		const dispatchTimes = [];
+		const pendingWork = [];
 		try {
 			if (options.action === "inputs") {
 				const base = apiRequestSchema(options.contract);
@@ -52,6 +53,8 @@ export default {
 			const results = await Promise.allSettled(
 				Array.from({ length: options.count ?? 1 }, () =>
 					runtime.run(operation, async (attempt) => {
+						let settled;
+						pendingWork.push(new Promise((resolve) => { settled = resolve; }));
 						attempts++;
 						active++;
 						peak = Math.max(peak, active);
@@ -85,11 +88,12 @@ export default {
 							return "ok";
 						} finally {
 							active--;
+							settled();
 						}
 					}),
 				),
 			);
-			await new Promise((resolve) => setTimeout(resolve, (options.delayMs ?? 5) + 10));
+			await Promise.all(pendingWork);
 			return Response.json({
 				attempts,
 				peak,

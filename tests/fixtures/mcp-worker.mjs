@@ -2,8 +2,27 @@ import { boundMcpRequest } from "../../src/mcp-requests.ts";
 import { observeCodeExecution } from "../../src/code-execution.ts";
 
 export default {
-	async fetch(request) {
+	async fetch(request, env) {
 		const options = await request.json();
+		if (options.action === "ingress") {
+			// Generate rejected uploads inside workerd, not over the harness's HTTP socket.
+			const padding = (options.character ?? "x").repeat(options.count);
+			const body = JSON.stringify(options.message
+				? { ...options.message, params: { ...options.message.params, _meta: { padding } } }
+				: { padding });
+			const response = await env.CONCIERGE.fetch(new Request(`https://concierge.j1.io${options.path ?? "/debug/mcp"}`, {
+				method: "POST",
+				headers: { Host: "concierge.j1.io", "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+				body,
+			}));
+			return Response.json({
+				status: response.status,
+				headers: Object.fromEntries(response.headers),
+				body: await response.text(),
+				requestChars: body.length,
+				requestBytes: new TextEncoder().encode(body).byteLength,
+			});
+		}
 		if (options.action === "telemetry") {
 			const logs = [];
 			let executions = 0;

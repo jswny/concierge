@@ -607,20 +607,30 @@ test("bounds streamed MCP bodies by actual bytes and cancels oversized input", a
 });
 
 test("limits MCP ingress without bypassing OAuth or debug gating", async () => {
-	const options = {
-		method: "POST", headers: { "Content-Type": "application/json" }, body: "x".repeat(4 * 1024 * 1024 + 1),
-	};
-	const response = await debugServer.getWorker("concierge").fetch(debugMcpUrl, options);
+	const limit = 4 * 1024 * 1024;
+	const run = async (options, server = debugServer) => (await server.getWorker("mcp-infrastructure-test").fetch("/", {
+		method: "POST", body: JSON.stringify({ action: "ingress", count: limit, ...options }),
+	})).json();
+	const response = await run({});
 	assert.equal(response.status, 413);
-	assert.equal(response.headers.get("Access-Control-Allow-Origin"), "*");
-	assert.doesNotMatch(JSON.stringify(await response.json()), /xxxxx/);
-	const unicode = await debugServer.getWorker("concierge").fetch(debugMcpUrl, {
-		...options, body: JSON.stringify({ padding: "\u00e9".repeat(2 * 1024 * 1024) }),
-	});
+	assert.equal(response.headers["access-control-allow-origin"], "*");
+	assert.doesNotMatch(response.body, /xxxxx/);
+	assert.match(JSON.parse(response.body).error.message, /4194304 bytes/);
+	const unicode = await run({ character: "\u00e9", count: limit / 2 });
+	assert.ok(unicode.requestChars < limit);
+	assert.ok(unicode.requestBytes > limit);
 	assert.equal(unicode.status, 413, "The body limit counts UTF-8 bytes, not characters.");
-	const production = productionServer.getWorker("concierge");
-	assert.equal((await production.fetch("https://concierge.j1.io/mcp", options)).status, 401);
-	assert.equal((await production.fetch("https://concierge.j1.io/debug/mcp", options)).status, 404);
+	const message = JSON.parse(mcpInitializeRequest().body);
+	const emptySize = Buffer.byteLength(JSON.stringify({ ...message, params: { ...message.params, _meta: { padding: "" } } }));
+	const boundary = await run({ message, count: limit - emptySize });
+	assert.equal(boundary.requestBytes, limit);
+	assert.equal(boundary.status, 200, boundary.body);
+	assert.match(boundary.body, new RegExp(`"protocolVersion":"${LEGACY_PROTOCOL_VERSION}"`));
+	assert.equal((await run({ message, count: limit - emptySize + 1 })).status, 413);
+	const production = await run({ path: "/mcp" }, productionServer);
+	assert.equal(production.status, 401);
+	assert.match(production.headers["www-authenticate"], /resource_metadata=/);
+	assert.equal((await run({ path: "/debug/mcp" }, productionServer)).status, 404);
 });
 
 test("advertises and enforces the submitted code length limit", async () => {
@@ -796,11 +806,13 @@ test("records metadata-only Code Mode telemetry for success and pre-connector fa
 			assert.equal(result.isError, isError);
 		}
 	});
-	await new Promise((resolve) => setTimeout(resolve, 20));
+	const events = await waitFor(() => {
+		const events = debugServer.getLogs().flatMap((log) => log.message ?? [])
+			.filter((message) => typeof message === "string" && message.startsWith('{"event":"code_execution"'))
+			.map((message) => JSON.parse(message));
+		return events.length >= 4 ? events : undefined;
+	}, "Code Mode execution telemetry");
 	const logs = debugServer.getLogs();
-	const events = logs.flatMap((log) => log.message ?? [])
-		.filter((message) => typeof message === "string" && message.startsWith('{"event":"code_execution"'))
-		.map((message) => JSON.parse(message));
 	assert.equal(events.length, 4, JSON.stringify(logs));
 	assert.deepEqual(events.map((event) => event.status), ["completed", "error", "error", "completed"]);
 	assert.deepEqual(events.map((event) => event.connectorCalls), [0, 0, 0, 1]);
@@ -1752,6 +1764,7 @@ function createConciergeHarness(debugEnabled, secrets = {}) {
 					compatibility_date: "2026-07-15",
 					main: "./tests/fixtures/mcp-worker.mjs",
 					name: "mcp-infrastructure-test",
+					services: [{ binding: "CONCIERGE", service: "concierge" }],
 				},
 			},
 		],
@@ -1773,6 +1786,16 @@ async function withMcpClient(options, run, server = debugServer) {
 		return await run(client);
 	} finally {
 		await client.close();
+	}
+}
+
+async function waitFor(check, description) {
+	const deadline = performance.now() + 5_000;
+	for (;;) {
+		const result = check();
+		if (result !== undefined) return result;
+		assert.ok(performance.now() < deadline, `Timed out waiting for ${description}.`);
+		await new Promise((resolve) => setTimeout(resolve, 25));
 	}
 }
 

@@ -26,7 +26,6 @@ const TEST_SECRETS = {
 	ACCESS_JWKS_URL: `${ACCESS_ISSUER}/jwks`,
 	ACCESS_TOKEN_URL: `${ACCESS_ISSUER}/token`,
 	COOKIE_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000",
-	NOTION_TOKEN: "test-notion-token",
 	GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify(GOOGLE_CREDENTIALS),
 	GOOGLE_MAPS_API_KEY: "test-maps-api-key",
 };
@@ -666,10 +665,11 @@ test("serves the code tool over the modern MCP protocol", async () => {
 			assert.match(tool.description ?? "", /codemode\.search.*connector method names/s);
 			const connectorSection = (tool.description ?? "").split("## Available connectors\n")[1]?.split("\n## ")[0];
 			assert.ok(connectorSection);
-			for (const name of ["cloudflare", "notion", "google", "maps"]) {
+			for (const name of ["cloudflare", "google", "maps"]) {
 				assert.match(connectorSection, new RegExp("- `" + name + "`"));
 			}
 			assert.match(connectorSection, /Routes API/);
+			assert.doesNotMatch(tool.description ?? "", /notion/i);
 			assert.match(tool.description ?? "", /Search first for the task capability/);
 			assert.match(tool.description ?? "", /Prefer a purpose-specific API connector/);
 			assert.match(tool.description ?? "", /search for `maps directions`/);
@@ -1008,10 +1008,10 @@ test("paginates fresh browser reads without losing content or silently mixing ve
 test("exposes generated connector contracts and validates browser inputs", async () => {
 	await withMcpClient(undefined, async (client) => {
 		const docs = await client.callTool({ name: "code", arguments: {
-			code: "async () => ({ notion: await codemode.describe('notion.request'), google: await codemode.describe('google.request'), browser: await codemode.describe('cloudflare.read_webpage_as_markdown') })",
+			code: "async () => ({ google: await codemode.describe('google.request'), browser: await codemode.describe('cloudflare.read_webpage_as_markdown') })",
 		} });
 		assert.equal(docs.isError, undefined);
-		assert.match(JSON.stringify(docs.structuredContent.result.notion), /GET.*POST.*PATCH.*DELETE/s);
+		assert.match(JSON.stringify(docs.structuredContent.result.google), /GET.*POST.*PATCH.*DELETE/s);
 		assert.match(JSON.stringify(docs.structuredContent.result.google), /gmail/);
 		assert.match(JSON.stringify(docs.structuredContent.result.browser), /url/);
 		for (const args of [null, {}, { url: "" }, { url: "not-a-url" }, { url: "ftp://example.com" }, { url: "https://user:password@example.com" }, { url: "https://example.com", extra: true }, ...[
@@ -1027,49 +1027,27 @@ test("exposes generated connector contracts and validates browser inputs", async
 	});
 });
 
-test("calls Notion with the configured API contract", async () => {
-	const originalFetch = globalThis.fetch;
-	let notionRequest;
-	globalThis.fetch = async (input, init) => {
-		const request = new Request(input, init);
-		if (request.url.startsWith("https://api.notion.com/")) {
-			notionRequest = request;
-			return Response.json({ id: "test-user", object: "user" });
-		}
-
-		return originalFetch(input, init);
-	};
-
-	try {
-		await withMcpClient(undefined, async (client) => {
-			const result = await client.callTool({
-				name: "code",
-				arguments: {
-					code: "async () => await notion.request({ method: 'GET', path: '/v1/users/me', query: { preview: true } })",
-				},
-			});
-
-			assert.deepEqual(result.structuredContent, {
-				result: { id: "test-user", object: "user" },
-			});
-		});
-
-		assert.ok(notionRequest);
-		assert.equal(notionRequest.method, "GET");
-		assert.equal(notionRequest.url, "https://api.notion.com/v1/users/me?preview=true");
-		assert.equal(notionRequest.headers.get("Authorization"), "Bearer test-notion-token");
-		assert.equal(notionRequest.headers.get("Notion-Version"), "2026-03-11");
-	} finally {
-		globalThis.fetch = originalFetch;
-	}
+test("does not expose the removed Notion connector", async () => {
+	await withMcpClient(undefined, async (client) => {
+		const result = await client.callTool({ name: "code", arguments: {
+			code: "async () => ({ matches: await codemode.search('notion'), available: typeof notion !== 'undefined' })",
+		} });
+		assert.equal(result.isError, undefined);
+		assert.ok(result.structuredContent.result.matches.results.every((match) => match.connector !== "notion"));
+		assert.equal(result.structuredContent.result.available, false);
+		const removedCall = await client.callTool({ name: "code", arguments: {
+			code: "async () => await notion.request({ method: 'GET', path: '/v1/users/me' })",
+		} });
+		assert.equal(removedCall.isError, true);
+	});
 });
 
-test("rejects invalid Notion and Google request arguments before outbound calls", async () => {
+test("rejects invalid Google request arguments before outbound calls", async () => {
 	const originalFetch = globalThis.fetch;
 	let outboundCalls = 0;
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
-		if (["api.notion.com", "gmail.googleapis.com", "oauth2.googleapis.com"].includes(new URL(request.url).hostname)) {
+		if (["gmail.googleapis.com", "oauth2.googleapis.com"].includes(new URL(request.url).hostname)) {
 			outboundCalls++;
 			return Response.json({});
 		}
@@ -1077,21 +1055,12 @@ test("rejects invalid Notion and Google request arguments before outbound calls"
 	};
 	try {
 		await withMcpClient(undefined, async (client) => {
-			for (const [connector, base] of [
-				["notion", { method: "GET", path: "/v1/users/me" }],
-				["google", { service: "gmail", method: "GET", path: "/gmail/v1/users/me/profile" }],
-			]) {
-				for (const fields of ["query: { value: NaN }", "query: { value: Infinity }", "query: { value: {} }", "body: {}", "extra: true", "method: 'TRACE'"]) {
-					const result = await client.callTool({ name: "code", arguments: {
-						code: `async () => await ${connector}.request({ ...${JSON.stringify(base)}, ${fields} })`,
-					} });
-					assert.equal(result.isError, true, `${connector}: ${fields}`);
-				}
+			for (const fields of ["query: { value: NaN }", "query: { value: Infinity }", "query: { value: {} }", "query: { values: [{}] }", "body: {}", "extra: true", "method: 'TRACE'"]) {
+				const result = await client.callTool({ name: "code", arguments: {
+					code: `async () => await google.request({ service: 'gmail', method: 'GET', path: '/gmail/v1/users/me/profile', ${fields} })`,
+				} });
+				assert.equal(result.isError, true, fields);
 			}
-			const result = await client.callTool({ name: "code", arguments: {
-				code: "async () => await notion.request({ method: 'GET', path: '/v1/users/me', query: { values: ['one'] } })",
-			} });
-			assert.equal(result.isError, true);
 		});
 		assert.equal(outboundCalls, 0);
 	} finally {
@@ -1613,18 +1582,16 @@ test("applies shared reliability to real MCP connector calls without replaying C
 			if (mode === "google-auth-failure") return Response.json({ error_description: "private signed assertion must not escape" }, { status: 503 });
 			return Response.json({ access_token: "test-google-workspace-token", expires_in: 3600 });
 		}
-		if (host === "gmail.googleapis.com") {
-			googleCalls++;
-			if (mode === "google-invalid") return new Response("invalid-json");
-			if (mode === "google-auth-invalidate") return Response.json({ error: { message: "rejected token" } }, { status: 401 });
-			if (mode === "google-permission") return Response.json({ error: { message: "private forbidden body", errors: [{ reason: "domainPolicy" }] } }, { status: 403 });
-			if (mode === "google-rate-write") return Response.json({ error: { message: "rate limit", errors: [{ reason: "userRateLimitExceeded" }] } }, { status: 403 });
-			if (mode === "google-rate" && googleCalls === 1) return Response.json({ error: { errors: [{ reason: "rateLimitExceeded" }] } }, { status: 403 });
-			return Response.json({ emailAddress: "joe@j1.io" });
-		}
-		if (host !== "api.notion.com") return originalFetch(input, init);
+		if (host !== "gmail.googleapis.com") return originalFetch(input, init);
+		googleCalls++;
+		assert.equal(request.headers.get("Authorization"), "Bearer test-google-workspace-token");
+		if (mode === "google-invalid") return new Response("invalid-json");
+		if (mode === "google-auth-invalidate") return Response.json({ error: { message: "rejected token" } }, { status: 401 });
+		if (mode === "google-permission") return Response.json({ error: { message: "private forbidden body", errors: [{ reason: "domainPolicy" }] } }, { status: 403 });
+		if (mode === "google-rate-write") return Response.json({ error: { message: "rate limit", errors: [{ reason: "userRateLimitExceeded" }] } }, { status: 403 });
+		if (mode === "google-rate" && googleCalls === 1) return Response.json({ error: { errors: [{ reason: "rateLimitExceeded" }] } }, { status: 403 });
+		if (mode.startsWith("google-")) return Response.json({ emailAddress: "joe@j1.io" });
 		calls++;
-		assert.equal(request.headers.get("Authorization"), "Bearer test-notion-token");
 		if (mode === "parallel") {
 			active++; peak = Math.max(peak, active);
 			await new Promise(resolve => setTimeout(resolve, 20));
@@ -1633,17 +1600,14 @@ test("applies shared reliability to real MCP connector calls without replaying C
 		}
 		if (request.method === "POST") {
 			writes++;
-			if (mode === "uncertain-write") return Response.json({ code: "service_unavailable", message: "try again" }, { status: 503 });
-			if (mode === "rate-write" && writes === 1) return Response.json({ code: "rate_limited" }, { status: 429, headers: { "Retry-After": "0" } });
-			if (mode === "overload-write" && writes === 1) return Response.json({ code: "service_overload" }, { status: 529, headers: { "Retry-After": "0" } });
+			if (mode === "uncertain-write") return Response.json({ error: { message: "try again" } }, { status: 503 });
 			return Response.json({ created: true });
 		}
-		if (mode === "blocked") return Response.json({ message: "private forbidden body", additional_data: { rate_limit_reason: "public_api_request_blocked" } }, { status: 429 });
-		if (mode === "retry" && calls < 3 || mode === "sequence" && calls === 2) return Response.json({ code: "service_unavailable", message: "temporary failure" }, { status: 503 });
+		if (mode === "retry" && calls < 3 || mode === "sequence" && calls === 2) return Response.json({ error: { message: "temporary failure" } }, { status: 503 });
 		return Response.json({ ok: true });
 	};
-	const read = "notion.request({ method: 'GET', path: '/v1/users/me' })";
-	const write = "notion.request({ method: 'POST', path: '/v1/pages', body: { parent: {} } })";
+	const read = "google.request({ service: 'gmail', method: 'GET', path: '/gmail/v1/users/me/profile' })";
+	const write = "google.request({ service: 'gmail', method: 'POST', path: '/gmail/v1/users/me/messages/send', body: { raw: 'test' } })";
 	const invoke = (client, code) => client.callTool({ name: "code", arguments: { code } });
 	try {
 		await withMcpClient(undefined, async client => {
@@ -1656,24 +1620,6 @@ test("applies shared reliability to real MCP connector calls without replaying C
 				const result = await invoke(client, `async () => { try { return await ${write}; } catch (error) { return String(error); } }`);
 				assert.equal(writes, 1);
 				assert.match(result.structuredContent.result, /safe_to_replay=false.*outcome=unknown.*verify external state/);
-			});
-			await t.test("retries a Notion-confirmed rate-limit rejection of a write", async () => {
-				mode = "rate-write"; calls = 0; writes = 0;
-				assert.deepEqual((await invoke(client, `async () => await ${write}`)).structuredContent, { result: { created: true } });
-				assert.equal(writes, 2);
-			});
-			await t.test("does not retry Notion access restrictions or expose forbidden bodies", async () => {
-				mode = "blocked"; calls = 0;
-				const result = await invoke(client, `async () => await ${read}`);
-				assert.equal(result.isError, true);
-				assert.equal(calls, 1);
-				assert.match(result.content[0].text, /permission/);
-				assert.doesNotMatch(result.content[0].text, /private forbidden/);
-			});
-			await t.test("retries a Notion-confirmed overload rejection of a write", async () => {
-				mode = "overload-write"; calls = 0; writes = 0;
-				assert.deepEqual((await invoke(client, `async () => await ${write}`)).structuredContent, { result: { created: true } });
-				assert.equal(writes, 2);
 			});
 			await t.test("distinguishes Gmail 403 rate limits from permissions without replaying writes", async () => {
 				const profile = "google.request({ service: 'gmail', method: 'GET', path: '/gmail/v1/users/me/profile' })";

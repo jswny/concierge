@@ -14,7 +14,6 @@ import { CloudflareConnector } from "./cloudflare-connector";
 import { GoogleWorkspaceAuth } from "./integrations/google/auth";
 import { GoogleConnector } from "./integrations/google/connector";
 import { MapsConnector } from "./integrations/maps/connector";
-import { NotionConnector } from "./notion-connector";
 import { ConnectorRequests } from "./connector-requests";
 import { boundMcpRequest, MAX_CODE_CHARS } from "./mcp-requests";
 import { observeCodeExecution } from "./code-execution";
@@ -47,7 +46,6 @@ function createConciergeServer(
 	const runtime = createCodemodeRuntime({
 		connectors: [
 			new CloudflareConnector(ctx, env, requests),
-			new NotionConnector(ctx, env, requests),
 			new GoogleConnector(ctx, env, googleAuth, requests),
 			new MapsConnector(ctx, env, requests),
 		],
@@ -62,8 +60,6 @@ function createConciergeServer(
 				"Call Google Workspace APIs as joe@j1.io through google.request. Gmail email and settings are enabled; consult official API documentation for request details.",
 			maps:
 				"Use maps.request for public businesses, places, ratings, hours, reviews, directions, travel times, distances, and route matrices through Places API (New) and Routes API. Prefer these APIs over reading Google Maps webpages for supported tasks. Consult official API documentation; pass field masks in query.fields. Requests may incur charges; select only needed fields and preserve Google Maps attribution.",
-			notion:
-				"Call the Notion REST API through notion.request with the server-side NOTION_TOKEN. Consult the current official Notion API documentation for request details.",
 		},
 	}).description;
 

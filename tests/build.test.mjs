@@ -21,6 +21,7 @@ test("Vite preserves the production configuration without enabling local debug",
 	assert.notEqual(output.vars.CONCIERGE_DEBUG, "true");
 	assert.equal(output.main, "index.js");
 	assert.equal(output.no_bundle, true);
+	assert.ok(!output.secrets.required.includes("NOTION_TOKEN"));
 });
 
 test("the Vite bundle runs MCP through the existing Durable Object and Worker Loader", async () => {
@@ -55,13 +56,14 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		assert.deepEqual(tools.map((tool) => tool.name), ["code"]);
 		assert.match(tools[0].description, /- `maps`.*Routes API/);
 		assert.match(tools[0].description, /- `google`.*Gmail/);
+		assert.doesNotMatch(tools[0].description, /notion/i);
 		assert.match(tools[0].description, /search for `maps directions`/);
 		const result = await client.callTool({ name: "code", arguments: {
 			code: "async () => ({ sum: 2 + 2, matches: await codemode.search('request') })",
 		} });
 		assert.equal(result.isError, undefined);
 		assert.equal(result.structuredContent.result.sum, 4);
-		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["cloudflare.read_webpage_as_markdown", "google.request", "maps.request", "notion.request"]);
+		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["cloudflare.read_webpage_as_markdown", "google.request", "maps.request"]);
 		const page = await client.callTool({ name: "code", arguments: {
 			code: "async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/test' })",
 		} });

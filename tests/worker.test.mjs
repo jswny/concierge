@@ -28,6 +28,7 @@ const TEST_SECRETS = {
 	COOKIE_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000",
 	GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify(GOOGLE_CREDENTIALS),
 	GOOGLE_MAPS_API_KEY: "test-maps-api-key",
+	UNIFI_API_KEY: "test-unifi-api-key",
 };
 
 const debugServer = createConciergeHarness(true);
@@ -665,7 +666,7 @@ test("serves the code tool over the modern MCP protocol", async () => {
 			assert.match(tool.description ?? "", /codemode\.search.*connector method names/s);
 			const connectorSection = (tool.description ?? "").split("## Available connectors\n")[1]?.split("\n## ")[0];
 			assert.ok(connectorSection);
-			for (const name of ["cloudflare", "google", "maps"]) {
+			for (const name of ["cloudflare", "google", "maps", "unifi"]) {
 				assert.match(connectorSection, new RegExp("- `" + name + "`"));
 			}
 			assert.match(connectorSection, /Routes API/);
@@ -1065,6 +1066,198 @@ test("rejects invalid Google request arguments before outbound calls", async () 
 		assert.equal(outboundCalls, 0);
 	} finally {
 		globalThis.fetch = originalFetch;
+	}
+});
+
+test("discovers UniFi and preserves native Site Manager, Network and Protect requests and responses", async () => {
+	const originalFetch = globalThis.fetch;
+	const requests = [];
+	const consoleId = "test-console:123";
+	const network = `/v1/connector/consoles/${encodeURIComponent(consoleId)}/proxy/network/integration/v1/`;
+	const protect = `/v1/connector/consoles/${encodeURIComponent(consoleId)}/proxy/protect/integration/v1/`;
+	const hosts = { data: [{ id: consoleId, owner: true, reportedState: { name: "Test console" } }], nextToken: "next-page:123", httpStatusCode: 200 };
+	const sites = { data: [{ id: "local-site-id", name: "Test site" }], count: 1, offset: 0, limit: 1, totalCount: 2 };
+	const cameras = [{ id: "camera-id", state: "CONNECTED" }];
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		const url = new URL(request.url);
+		if (url.hostname !== "api.ui.com") return originalFetch(input, init);
+		requests.push(request);
+		if (request.method === "DELETE") return new Response(null, { status: 204 });
+		return Response.json(url.pathname === "/v1/hosts" ? hosts : url.pathname.startsWith(protect) ? cameras : sites);
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			const tools = await client.listTools();
+			assert.match(tools.tools[0].description, /unifi\.request/);
+			for (const query of ["unifi", "wifi clients", "camera NVR status", "console discovery"]) {
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await codemode.search(${JSON.stringify(query)})` } });
+				assert.equal(result.isError, undefined);
+				assert.ok(result.structuredContent.result.results.some((match) => match.path === "unifi.request"), query);
+			}
+			const docs = await client.callTool({ name: "code", arguments: { code: "async () => await codemode.describe('unifi.request')" } });
+			assert.equal(docs.isError, undefined);
+			assert.match(docs.structuredContent.result.types, /GET.*POST.*PUT.*PATCH.*DELETE/s);
+			assert.match(docs.structuredContent.result.description, /\/v1\/hosts/);
+			assert.match(docs.structuredContent.result.description, /siteId/);
+			for (const [options, expectedPayload] of [
+				[{ method: "GET", path: "/v1/hosts", query: { pageSize: 1, nextToken: "next-page:123" } }, hosts],
+				[{ method: "GET", path: "/v1/devices", query: { hostIds: [consoleId, "another-console"] } }, sites],
+				[{ method: "GET", path: `${network}sites`, query: { offset: 0, limit: 1 } }, sites],
+				[{ method: "GET", path: `${network}sites/local-site-id/clients`, query: { filter: "name.like('Test')" } }, sites],
+				[{ method: "GET", path: `${protect}cameras` }, cameras],
+				[{ method: "POST", path: `${network}sites/local-site-id/networks`, body: { name: "Test network" } }, sites],
+				[{ method: "PUT", path: `${network}sites/local-site-id/networks/network-id`, body: { name: "Updated network" } }, sites],
+				[{ method: "PATCH", path: `${protect}cameras/camera-id`, body: { name: "Updated camera" } }, cameras],
+				[{ method: "DELETE", path: `${network}sites/local-site-id/networks/network-id` }, null],
+			]) {
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await unifi.request(${JSON.stringify(options)})` } });
+				assert.equal(result.isError, undefined, JSON.stringify(options));
+				assert.deepEqual(result.structuredContent.result, expectedPayload);
+				const request = requests.at(-1);
+				const expectedUrl = new URL(options.path, "https://api.ui.com");
+				for (const [key, value] of Object.entries(options.query ?? {})) for (const item of Array.isArray(value) ? value : [value]) expectedUrl.searchParams.append(key, String(item));
+				assert.equal(request.url, expectedUrl.href);
+				assert.equal(request.method, options.method);
+				assert.equal(request.headers.get("X-API-Key"), TEST_SECRETS.UNIFI_API_KEY);
+				assert.equal(request.headers.get("Accept"), "application/json");
+				assert.equal(request.headers.has("Authorization"), false);
+				assert.equal(request.headers.has("X-Goog-Api-Key"), false);
+				if (options.body) {
+					assert.equal(request.headers.get("Content-Type"), "application/json");
+					assert.deepEqual(await request.json(), options.body);
+				}
+				assert.doesNotMatch(JSON.stringify(result), /test-unifi-api-key|test-maps-api-key|test-google-workspace-token/);
+			}
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("rejects invalid UniFi inputs, credential overrides, and unsupported proxy boundaries before dispatch", async () => {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		if (new URL(request.url).hostname !== "api.ui.com") return originalFetch(input, init);
+		calls++;
+		return Response.json({});
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			for (const override of [
+				{ method: "TRACE" }, { body: {} }, { extra: true }, { headers: { "X-API-Key": "caller-key" } },
+				{ query: { api_key: "caller-key" } }, { query: { access_token: "caller-token" } }, { query: { nested: {} } },
+				{ path: "https://evil.example/v1/hosts" }, { path: "https://api.ui.com/v1/hosts" },
+				{ path: "/v1/../token" }, { path: "/v1/%2e%2e/token" }, { path: "/v1/hosts?key=caller-key" }, { path: "/v1/hosts#fragment" },
+				{ path: "/v1/connector" }, { path: "/v1/connector/consoles/id/proxy/drive/api/v2/files" },
+				{ path: "/v1/connector/consoles/id/proxy/network/api/s/default/stat/sta" },
+				{ path: "/v1/connector/consoles/id/proxy/users/api/v1/users" },
+				{ path: "/v1/connector/consoles/id/proxy/protect/integration/v1/../../api/bootstrap" },
+				{ path: "/v1/connector/consoles/id/proxy/network/integration/v1/%252e%252e/api" },
+				{ path: "/v1/connector/consoles/id%2Fproxy/proxy/network/integration/v1/sites" },
+				{ path: "/v1/connector//consoles/id/proxy/network/integration/v1/sites" },
+				{ path: "/v1/connector/consoles/id/proxy/network/integration/v1/".replace("/proxy/", "/proxy\\") },
+			]) {
+				const options = { method: "GET", path: "/v1/hosts", ...override };
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await unifi.request(${JSON.stringify(options)})` } });
+				assert.equal(result.isError, true, JSON.stringify(override));
+			}
+		});
+		assert.equal(calls, 0);
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("UniFi reuses shared read retries, preserves unknown writes, and redacts provider errors", async () => {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	let status = 503;
+	let recover = true;
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		if (new URL(request.url).hostname !== "api.ui.com") return originalFetch(input, init);
+		calls++;
+		if (recover && calls > 1) return Response.json({ data: [], nextToken: "next-page" });
+		return Response.json({ code: "provider_error", message: `private-body ${TEST_SECRETS.UNIFI_API_KEY}`, traceId: `trace-${TEST_SECRETS.UNIFI_API_KEY}` }, { status, headers: { "Retry-After": "0" } });
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			const invoke = (method = "GET") => client.callTool({ name: "code", arguments: {
+				code: `async () => await unifi.request({ method: '${method}', path: '/v1/connector/consoles/id/proxy/protect/integration/v1/cameras/camera-id', ${method === "GET" ? "" : "body: { name: 'Updated camera' }"} })`,
+			} });
+			assert.deepEqual((await invoke()).structuredContent.result, { data: [], nextToken: "next-page" });
+			assert.equal(calls, 2);
+			calls = 0; status = 408;
+			assert.equal((await invoke()).isError, undefined);
+			assert.equal(calls, 2, "A proxy timeout may be retried for a read.");
+			for (const mutationStatus of [408, 429, 503]) {
+				calls = 0; status = mutationStatus;
+				const result = await invoke("PATCH");
+				assert.equal(result.isError, true);
+				assert.equal(calls, 1);
+				assert.match(result.content[0].text, /safe_to_replay=false/);
+				assert.match(result.content[0].text, mutationStatus === 429 ? /outcome=rejected/ : /outcome=unknown/);
+				assert.doesNotMatch(JSON.stringify(result), /test-unifi-api-key/);
+			}
+			for (const authStatus of [401, 403]) {
+				calls = 0; status = authStatus; recover = false;
+				const result = await invoke();
+				assert.equal(result.isError, true);
+				assert.equal(calls, 1);
+				assert.doesNotMatch(JSON.stringify(result), /private-body|test-unifi-api-key/);
+			}
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("UniFi rejects redirects and non-JSON media without exposing response bodies", async () => {
+	const originalFetch = globalThis.fetch;
+	let mode = "redirect";
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		if (!["api.ui.com", "evil.example"].includes(new URL(request.url).hostname)) return originalFetch(input, init);
+		assert.equal(new URL(request.url).hostname, "api.ui.com", "API credentials must never follow a redirect.");
+		calls++;
+		return mode === "redirect" ? new Response(null, { status: 302, headers: { Location: "https://evil.example/" } })
+			: new Response("private-image-data", { headers: { "Content-Type": "image/jpeg" } });
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			for (const currentMode of ["redirect", "media"]) {
+				mode = currentMode; calls = 0;
+				const result = await client.callTool({ name: "code", arguments: {
+					code: "async () => await unifi.request({ method: 'GET', path: '/v1/connector/consoles/id/proxy/protect/integration/v1/cameras/camera-id/snapshot' })",
+				} });
+				assert.equal(result.isError, true);
+				assert.equal(calls, 1);
+				assert.doesNotMatch(JSON.stringify(result), /private-image-data|test-unifi-api-key/);
+			}
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("UniFi fails clearly before dispatch when its API key is missing", async () => {
+	const harness = createConciergeHarness(true, { UNIFI_API_KEY: "" });
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		if (new URL(new Request(input, init).url).hostname === "api.ui.com") {
+			calls++;
+			return Response.json({});
+		}
+		return originalFetch(input, init);
+	};
+	try {
+		await harness.listen();
+		await withMcpClient(undefined, async (client) => {
+			const result = await client.callTool({ name: "code", arguments: { code: "async () => await unifi.request({ method: 'GET', path: '/v1/hosts' })" } });
+			assert.equal(result.isError, true);
+			assert.match(result.content[0].text, /UNIFI_API_KEY is not configured/);
+		}, harness);
+		assert.equal(calls, 0);
+	} finally {
+		globalThis.fetch = originalFetch;
+		await harness.close();
 	}
 });
 

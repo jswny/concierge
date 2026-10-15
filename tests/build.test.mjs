@@ -56,6 +56,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		assert.deepEqual(tools.map((tool) => tool.name), ["code"]);
 		assert.match(tools[0].description, /- `maps`.*Routes API/);
 		assert.match(tools[0].description, /- `google`.*Gmail/);
+		assert.match(tools[0].description, /- `unifi`.*unifi\.request/);
 		assert.doesNotMatch(tools[0].description, /notion/i);
 		assert.match(tools[0].description, /search for `maps directions`/);
 		const result = await client.callTool({ name: "code", arguments: {
@@ -63,7 +64,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		} });
 		assert.equal(result.isError, undefined);
 		assert.equal(result.structuredContent.result.sum, 4);
-		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["cloudflare.read_webpage_as_markdown", "google.request", "maps.request"]);
+		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["cloudflare.read_webpage_as_markdown", "google.request", "maps.request", "unifi.request"]);
 		const page = await client.callTool({ name: "code", arguments: {
 			code: "async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/test' })",
 		} });

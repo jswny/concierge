@@ -11,6 +11,7 @@ import { createTestHarness } from "wrangler";
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const MODERN_PROTOCOL_VERSION = "2026-07-28";
 const LEGACY_PROTOCOL_VERSION = "2025-11-25";
+const MCP_ICONS = [{ src: "https://concierge.j1.io/assets/concierge.svg", mimeType: "image/svg+xml", sizes: ["any"] }];
 const GOOGLE_KEYS = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const ACCESS_ISSUER = "https://access.example/cdn-cgi/access/sso/oidc/test-access-client";
 const GOOGLE_CREDENTIALS = {
@@ -84,6 +85,25 @@ test("advertises CIMD without dynamic client registration", async () => {
 	const resourceMetadata = await resourceResponse.json();
 	assert.equal(resourceMetadata.resource, "https://concierge.j1.io/mcp");
 	assert.deepEqual(resourceMetadata.bearer_methods_supported, ["header"]);
+});
+
+test("serves only the public logo asset without OAuth", async () => {
+	const response = await productionServer.fetch("/assets/concierge.svg");
+	assert.equal(response.status, 200);
+	assert.match(response.headers.get("Content-Type"), /^image\/svg\+xml/);
+	assert.equal(response.headers.has("Set-Cookie"), false);
+	assert.equal(response.headers.has("WWW-Authenticate"), false);
+	const svg = await response.text();
+	assert.match(svg, /<title id="title">Concierge<\/title>/);
+	assert.doesNotMatch(svg, /<script|https?:\/\/(?!www\.w3\.org\/2000\/svg)/);
+	const head = await productionServer.fetch("/assets/concierge.svg", { method: "HEAD" });
+	assert.equal(head.status, 200);
+	assert.equal(await head.text(), "");
+	const post = await productionServer.fetch("/assets/concierge.svg", { method: "POST" });
+	assert.ok([404, 405].includes(post.status));
+	for (const path of ["/assets/missing.svg", "/assets/", "/assets/../src/index.ts"]) {
+		assert.equal((await productionServer.fetch(path)).status, 404, path);
+	}
 });
 
 test("authorizes a CIMD public client through Access and refreshes its MCP token", () => testCimdAuthorization("none"));
@@ -659,10 +679,12 @@ test("serves the code tool over the modern MCP protocol", async () => {
 		async (client) => {
 			assert.equal(client.getNegotiatedProtocolVersion(), MODERN_PROTOCOL_VERSION);
 			assert.equal(client.getServerCapabilities().tools.listChanged, false);
+			assert.deepEqual(client.getServerVersion().icons, MCP_ICONS);
 			const { tools } = await client.listTools();
 			assert.equal(tools.length, 1);
 			const [tool] = tools;
 			assert.equal(tool.name, "code");
+			assert.equal(tool.icons, undefined);
 			assert.match(tool.description ?? "", /codemode\.search.*connector method names/s);
 			const connectorSection = (tool.description ?? "").split("## Available connectors\n")[1]?.split("\n## ")[0];
 			assert.ok(connectorSection);
@@ -719,11 +741,13 @@ test("retains legacy MCP compatibility", async () => {
 	await withMcpClient(undefined, async (client) => {
 		assert.equal(client.getNegotiatedProtocolVersion(), LEGACY_PROTOCOL_VERSION);
 		assert.equal(client.getServerCapabilities().tools.listChanged, false);
+		assert.deepEqual(client.getServerVersion().icons, MCP_ICONS);
 		const { tools } = await client.listTools();
 		assert.deepEqual(
 			tools.map((tool) => tool.name),
 			["code"],
 		);
+		assert.equal(tools[0].icons, undefined);
 
 		const result = await client.callTool({
 			name: "code",

@@ -7,6 +7,9 @@
 	"name": "concierge",
 	"account_id": "40444d2f11999fee857be59abe745754",
 	"main": "src/index.ts",
+	"assets": {
+		"directory": "./public"
+	},
 	"compatibility_date": "2026-07-15",
 	"routes": [
 		{

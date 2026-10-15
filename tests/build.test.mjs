@@ -11,13 +11,18 @@ test("Vite preserves the production configuration without enabling local debug",
 	const output = JSON.parse(readFileSync(new URL("../dist/concierge/wrangler.json", import.meta.url), "utf8"));
 	for (const key of [
 		"name", "account_id", "compatibility_date", "compatibility_flags",
-		"routes", "workers_dev", "preview_urls", "assets", "triggers",
+		"routes", "workers_dev", "preview_urls", "triggers",
 		"kv_namespaces", "browser", "worker_loaders", "durable_objects",
 		"migrations", "secrets", "observability", "upload_source_maps", "services",
 	]) {
 		assert.deepEqual(output[key], input[key], key);
 	}
 	assert.deepEqual(output.vars, input.vars);
+	const { directory: inputAssetDirectory, ...inputAssets } = input.assets;
+	const { directory: outputAssetDirectory, ...outputAssets } = output.assets;
+	assert.deepEqual(outputAssets, inputAssets);
+	assert.equal(readFileSync(new URL(`${outputAssetDirectory}/assets/concierge.svg`, new URL("../dist/concierge/", import.meta.url)), "utf8"),
+		readFileSync(new URL(`${inputAssetDirectory}/assets/concierge.svg`, new URL("../", import.meta.url)), "utf8"));
 	assert.notEqual(output.vars.CONCIERGE_DEBUG, "true");
 	assert.equal(output.main, "index.js");
 	assert.equal(output.no_bundle, true);
@@ -46,6 +51,10 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 	try {
 		const listener = await harness.listen();
 		const worker = harness.getWorker("concierge");
+		const logo = await harness.fetch("/assets/concierge.svg");
+		assert.equal(logo.status, 200);
+		assert.match(logo.headers.get("Content-Type"), /^image\/svg\+xml/);
+		assert.equal(await logo.text(), readFileSync(new URL("../public/assets/concierge.svg", import.meta.url), "utf8"));
 		const protectedResponse = await worker.fetch("https://concierge.j1.io/mcp", { method: "POST" });
 		assert.equal(protectedResponse.status, 401);
 		await client.connect(new StreamableHTTPClientTransport(new URL("/debug/mcp", listener.url), {
@@ -54,6 +63,8 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		assert.equal(client.getNegotiatedProtocolVersion(), "2026-07-28");
 		const tools = (await client.listTools()).tools;
 		assert.deepEqual(tools.map((tool) => tool.name), ["code"]);
+		assert.equal(tools[0].icons, undefined);
+		assert.deepEqual(client.getServerVersion().icons, [{ src: "https://concierge.j1.io/assets/concierge.svg", mimeType: "image/svg+xml", sizes: ["any"] }]);
 		assert.match(tools[0].description, /- `maps`.*Routes API/);
 		assert.match(tools[0].description, /- `google`.*Gmail/);
 		assert.match(tools[0].description, /- `unifi`.*unifi\.request/);

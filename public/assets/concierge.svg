@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Concierge</title>
+  <desc id="desc">A gold service bell with a dark outline and a light outer edge, on a transparent background.</desc>
+  <defs>
+    <g id="bell" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M128 56v25"/>
+      <rect x="108" y="42" width="40" height="16" rx="8" fill="#F0B84B"/>
+      <path d="M44 176c0-55 37-98 84-98s84 43 84 98H44Z" fill="#F0B84B"/>
+      <path d="M36 176h184l10 24c1 3-1 6-4 6H30c-3 0-5-3-4-6l10-24Z" fill="#17252B"/>
+    </g>
+  </defs>
+  <use href="#bell" stroke="#F7F9FA" stroke-width="16"/>
+  <use href="#bell" stroke="#17252B" stroke-width="8"/>
+  <path d="M75 144c7-19 20-34 37-41" stroke="#FFF5DB" stroke-width="9" stroke-linecap="round"/>
+  <path d="M49 188h158" stroke="#F0B84B" stroke-width="6" stroke-linecap="round"/>
+</svg>

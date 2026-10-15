@@ -32,6 +32,11 @@ type TextToolResult = {
 };
 
 const MCP_ALLOWED_HOSTNAMES = ["concierge.j1.io", "localhost", "127.0.0.1", "[::1]"];
+const MCP_ICONS = [{
+	src: "https://concierge.j1.io/assets/concierge.svg",
+	mimeType: "image/svg+xml",
+	sizes: ["any"],
+}];
 
 function createConciergeServer(
 	ctx: DurableObjectState,
@@ -42,6 +47,7 @@ function createConciergeServer(
 	const server = new McpServer({
 		name: "Concierge MCP",
 		version: "1.0.0",
+		icons: MCP_ICONS,
 	});
 	server.server.registerCapabilities({ tools: { listChanged: false } });
 	const runtime = createCodemodeRuntime({

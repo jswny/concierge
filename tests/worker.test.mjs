@@ -7,6 +7,9 @@ import {
 	StreamableHTTPClientTransport,
 } from "@modelcontextprotocol/client";
 import { createTestHarness } from "wrangler";
+import { JPEG_BASE64 } from "./fixtures/jpeg.mjs";
+
+const JPEG = Buffer.from(JPEG_BASE64, "base64");
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const MODERN_PROTOCOL_VERSION = "2026-07-28";
@@ -707,6 +710,7 @@ test("serves the code tool over the modern MCP protocol", async () => {
 				assert.match(connectorSection, new RegExp("- `" + name + "`"));
 			}
 			assert.match(connectorSection, /Routes API/);
+			assert.match(connectorSection, /JPEG camera snapshots/);
 			assert.doesNotMatch(tool.description ?? "", /notion/i);
 			assert.match(tool.description ?? "", /Search first for the task capability/);
 			assert.match(tool.description ?? "", /Prefer a purpose-specific API connector/);
@@ -716,6 +720,8 @@ test("serves the code tool over the modern MCP protocol", async () => {
 			assert.match(tool.description ?? "", /outcome=unknown/);
 			assert.match(tool.description ?? "", /use native API pagination inside the function/);
 			assert.match(tool.description ?? "", /Do not treat truncated output as complete or reuse a truncated identifier or cursor/);
+			assert.match(tool.description ?? "", /Return connector image values unchanged/);
+			assert.match(tool.description ?? "", /At most 4 images totaling 4 MiB/);
 			assert.deepEqual(tool.annotations, {
 				destructiveHint: true,
 				idempotentHint: false,
@@ -1129,7 +1135,7 @@ test("discovers UniFi and preserves native Site Manager, Network and Protect req
 		await withMcpClient(undefined, async (client) => {
 			const tools = await client.listTools();
 			assert.match(tools.tools[0].description, /unifi\.request/);
-			for (const query of ["unifi", "wifi clients", "camera NVR status", "console discovery"]) {
+			for (const query of ["unifi", "wifi clients", "camera NVR status", "console discovery", "camera snapshot"]) {
 				const result = await client.callTool({ name: "code", arguments: { code: `async () => await codemode.search(${JSON.stringify(query)})` } });
 				assert.equal(result.isError, undefined);
 				assert.ok(result.structuredContent.result.results.some((match) => match.path === "unifi.request"), query);
@@ -1159,7 +1165,7 @@ test("discovers UniFi and preserves native Site Manager, Network and Protect req
 				assert.equal(request.url, expectedUrl.href);
 				assert.equal(request.method, options.method);
 				assert.equal(request.headers.get("X-API-Key"), TEST_SECRETS.UNIFI_API_KEY);
-				assert.equal(request.headers.get("Accept"), "application/json");
+				assert.equal(request.headers.get("Accept"), "application/json, image/jpeg");
 				assert.equal(request.headers.has("Authorization"), false);
 				assert.equal(request.headers.has("X-Goog-Api-Key"), false);
 				if (options.body) {
@@ -1248,7 +1254,7 @@ test("UniFi reuses shared read retries, preserves unknown writes, and redacts pr
 	} finally { globalThis.fetch = originalFetch; }
 });
 
-test("UniFi rejects redirects and non-JSON media without exposing response bodies", async () => {
+test("UniFi rejects redirects and unsupported media without exposing response bodies", async () => {
 	const originalFetch = globalThis.fetch;
 	let mode = "redirect";
 	let calls = 0;
@@ -1258,7 +1264,7 @@ test("UniFi rejects redirects and non-JSON media without exposing response bodie
 		assert.equal(new URL(request.url).hostname, "api.ui.com", "API credentials must never follow a redirect.");
 		calls++;
 		return mode === "redirect" ? new Response(null, { status: 302, headers: { Location: "https://evil.example/" } })
-			: new Response("private-image-data", { headers: { "Content-Type": "image/jpeg" } });
+			: new Response("private-image-data", { headers: { "Content-Type": "video/mp4" } });
 	};
 	try {
 		await withMcpClient(undefined, async (client) => {
@@ -1270,10 +1276,102 @@ test("UniFi rejects redirects and non-JSON media without exposing response bodie
 				assert.equal(result.isError, true);
 				assert.equal(calls, 1);
 				assert.match(result.content[0].text, currentMode === "media"
-					? /unsupported response format \(image\/jpeg\).*JSON only.*unsupported_response/
+					? /unsupported response format \(video\/mp4\).*JSON or image\/jpeg.*unsupported_response/
 					: /HTTP 302/);
 				assert.doesNotMatch(JSON.stringify(result), /private-image-data|test-unifi-api-key/);
 			}
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("delivers returned Protect JPEG snapshots as native MCP images with compact JSON references", async (t) => {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	let body = JPEG;
+	let contentType = "IMAGE/JPEG; filename=private-camera-name.jpg";
+	let status = 200;
+	const snapshot = "unifi.request({ method: 'GET', path: '/v1/connector/consoles/id/proxy/protect/integration/v1/cameras/camera-id/snapshot', query: { highQuality: false } })";
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		if (new URL(request.url).hostname !== "api.ui.com") return originalFetch(input, init);
+		calls++;
+		assert.equal(request.headers.get("X-API-Key"), TEST_SECRETS.UNIFI_API_KEY);
+		assert.equal(request.headers.get("Accept"), "application/json, image/jpeg");
+		return new Response(body, { status, headers: { "Content-Type": contentType } });
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			const invoke = (code) => client.callTool({ name: "code", arguments: { code } });
+			const metadata = (index, byteLength = body.length) => ({ type: "image", mimeType: "image/jpeg", byteLength, contentIndex: index });
+			await t.test("delivers a direct image without base64 in text or structured content", async () => {
+				const result = await invoke(`async () => await ${snapshot}`);
+				assert.equal(result.isError, undefined);
+				assert.deepEqual(result.structuredContent.result, metadata(1));
+				assert.deepEqual(JSON.parse(result.content[0].text), metadata(1));
+				assert.deepEqual(result.content[1], { type: "image", mimeType: "image/jpeg", data: JPEG_BASE64 });
+				assert.doesNotMatch(JSON.stringify(result.structuredContent), /\/9j|private-camera-name|test-unifi-api-key/);
+			});
+			await t.test("delivers images over the modern MCP protocol too", async () => {
+				await withMcpClient({ versionNegotiation: { mode: { pin: MODERN_PROTOCOL_VERSION } } }, async (modern) => {
+					const result = await modern.callTool({ name: "code", arguments: { code: `async () => await ${snapshot}` } });
+					assert.equal(result.isError, undefined);
+					assert.equal(result.content[1].data, JPEG_BASE64);
+					assert.deepEqual(result.structuredContent.result, metadata(1));
+				});
+			});
+			await t.test("preserves nested multiple images alongside JSON and only delivers returned images", async () => {
+				const result = await invoke(`async () => { const snapshot = await ${snapshot}; return { camera: { id: 'camera-id' }, snapshots: [snapshot, { detail: snapshot }] }; }`);
+				assert.deepEqual(result.structuredContent.result, { camera: { id: "camera-id" }, snapshots: [metadata(1), { detail: metadata(2) }] });
+				assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent.result);
+				assert.equal(result.content.length, 3);
+				assert.equal(result.content[2].data, JPEG_BASE64);
+				const ignored = await invoke(`async () => { await ${snapshot}; return { inspected: true }; }`);
+				assert.deepEqual(ignored.structuredContent.result, { inspected: true });
+				assert.equal(ignored.content.length, 1);
+			});
+			await t.test("does not truncate image bytes when truncating large JSON output", async () => {
+				body = Buffer.concat([JPEG, Buffer.alloc(150_000)]);
+				const result = await invoke(`async () => ({ snapshot: await ${snapshot}, note: 'x'.repeat(200000) })`);
+				assert.equal(result.isError, undefined);
+				assert.match(result.content[0].text, /--- TRUNCATED ---/);
+				assert.deepEqual(result.structuredContent.result.snapshot, metadata(1));
+				assert.deepEqual(Buffer.from(result.content[1].data, "base64"), body);
+				assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent.result);
+				body = JPEG;
+			});
+			await t.test("bounds image count and aggregate size without delivering partial or truncated images", async () => {
+				for (const code of [
+					`async () => { const image = await ${snapshot}; return Array(5).fill(image); }`,
+					`async () => { const image = await ${snapshot}; const data = new Uint8Array(2097153); data.set(image.data); return [{ ...image, data }, { ...image, data }]; }`,
+				]) {
+					const before = calls;
+					const result = await invoke(code);
+					assert.equal(result.isError, true);
+					assert.equal(calls, before + 1);
+					assert.match(result.content[0].text, /at most 4 images totaling 4 MiB.*do not replay writes/);
+					assert.equal(result.content.length, 1);
+					assert.equal(result.structuredContent, undefined);
+				}
+			});
+			await t.test("rejects invalid JPEG, unsupported images and video, and preserves non-JSON HTTP failures", async () => {
+				for (const [type, bytes, httpStatus, expected] of [
+					["image/jpeg", Buffer.from("private-not-image"), 200, /invalid JPEG.*invalid_response/],
+					["image/png", JPEG, 200, /unsupported_response/],
+					["video/mp4", JPEG, 200, /unsupported_response/],
+					["image/svg+xml", Buffer.from("private-svg"), 200, /unsupported_response/],
+					["image/jpeg", JPEG, 403, /HTTP 403.*permission/],
+					["image/jpeg", Buffer.alloc(4 * 1024 * 1024 + 1), 200, /response_too_large/],
+				]) {
+					contentType = type; body = bytes; status = httpStatus;
+					const before = calls;
+					const result = await invoke(`async () => await ${snapshot}`);
+					assert.equal(result.isError, true);
+					assert.equal(calls, before + 1);
+					assert.match(result.content[0].text, expected);
+					assert.doesNotMatch(JSON.stringify(result), /private-not-image|private-svg|test-unifi-api-key/);
+					assert.ok(result.content.every((entry) => entry.type === "text"));
+				}
+			});
 		});
 	} finally { globalThis.fetch = originalFetch; }
 });
@@ -1781,6 +1879,24 @@ test("shares bounded reliability behavior across connector operations", async (t
 		assert.doesNotMatch(malformed.results[0].error, /private-response-body/);
 		const text = await run({ action: "body", closeBody: true, body: "plain text", format: "json-or-text", headers: { "Content-Type": "text/plain" } });
 		assert.equal(text.results[0].result, "plain text");
+	});
+	await t.test("image response mode preserves shared byte limits, cancellation, deadlines, and JSON", async () => {
+		const options = { action: "body", format: "json-or-image", bodyBase64: JPEG_BASE64, headers: { "Content-Type": "image/jpeg" } };
+		const image = await run({ ...options, closeBody: true });
+		assert.equal(image.results[0].result.mimeType, "image/jpeg");
+		assert.deepEqual(Buffer.from(Object.values(image.results[0].result.data)), JPEG);
+		const large = await run({ ...options, limits: { maxResponseBytes: JPEG.length - 1 } });
+		assert.equal(large.cancelled, true);
+		assert.equal(large.results[0].details.category, "response_too_large");
+		const slow = await run({ ...options, readOnly: false, limits: { timeoutMs: 25 } });
+		assert.equal(slow.cancelled, true);
+		assert.equal(slow.results[0].details.category, "timeout");
+		assert.equal(slow.results[0].details.outcome, "succeeded");
+		const video = await run({ ...options, headers: { "Content-Type": "video/mp4" } });
+		assert.equal(video.cancelled, true);
+		assert.equal(video.results[0].details.category, "unsupported_response");
+		const json = await run({ action: "body", format: "json-or-image", closeBody: true, body: '{"native":true}', headers: { "Content-Type": "application/json" } });
+		assert.deepEqual(json.results[0].result, { native: true });
 	});
 	await t.test("HTTP requests include preparation in deadlines and redact credentials", async () => {
 		const originalFetch = globalThis.fetch;

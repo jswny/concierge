@@ -72,7 +72,9 @@ export default {
 								const response = new Response(
 									new ReadableStream({
 										start(controller) {
-											controller.enqueue(new TextEncoder().encode(options.body ?? "{}"));
+											controller.enqueue(options.bodyBase64
+												? Uint8Array.from(atob(options.bodyBase64), (char) => char.charCodeAt(0))
+												: new TextEncoder().encode(options.body ?? "{}"));
 											if (options.closeBody) controller.close();
 										},
 										cancel() {

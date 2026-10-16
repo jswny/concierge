@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { createTestHarness, unstable_readConfig } from "wrangler";
+import { JPEG_BASE64 } from "./fixtures/jpeg.mjs";
 
 test("Vite preserves the production configuration without enabling local debug", () => {
 	// Match JSON output serialization, which omits undefined optional fields.
@@ -92,6 +93,15 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		assert.equal(page.structuredContent.result.status, 200);
 		assert.equal(page.structuredContent.result.finalUrl, "https://example.com/final");
 		assert.match(page.structuredContent.result.markdown, /Wait: networkidle2/);
+		const image = await client.callTool({ name: "code", arguments: {
+			code: `async () => ({ snapshot: { type: 'image', mimeType: 'image/jpeg', data: Uint8Array.from(atob('${JPEG_BASE64}'), c => c.charCodeAt(0)) } })`,
+		} });
+		assert.equal(image.isError, undefined);
+		assert.deepEqual(image.content[1], { type: "image", mimeType: "image/jpeg", data: JPEG_BASE64 });
+		assert.deepEqual(image.structuredContent.result.snapshot, {
+			type: "image", mimeType: "image/jpeg", byteLength: Buffer.from(JPEG_BASE64, "base64").length, contentIndex: 1,
+		});
+		assert.deepEqual(JSON.parse(image.content[0].text), image.structuredContent.result);
 	} finally {
 		await client.close();
 		await harness.close();

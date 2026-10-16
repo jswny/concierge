@@ -9,6 +9,7 @@ import { DurableObject } from "cloudflare:workers";
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
+import { Buffer } from "node:buffer";
 import { handleAccessRequest } from "./access-handler";
 import { CloudflareConnector } from "./cloudflare-connector";
 import { GoogleWorkspaceAuth } from "./integrations/google/auth";
@@ -18,6 +19,7 @@ import { UnifiConnector } from "./integrations/unifi/connector";
 import { ConnectorRequests } from "./connector-requests";
 import { boundMcpRequest, MAX_CODE_CHARS } from "./mcp-requests";
 import { observeCodeExecution } from "./code-execution";
+import { hasJpegSignature, isConnectorImage } from "./connector-images";
 
 export { CodemodeRuntime } from "@cloudflare/codemode";
 
@@ -25,8 +27,9 @@ type DebugEnv = Env & {
 	CONCIERGE_DEBUG?: string;
 };
 
-type TextToolResult = {
-	content: Array<{ text: string; type: "text" }>;
+type ImageContent = { type: "image"; mimeType: string; data: string };
+type CodeToolResult = {
+	content: Array<{ text: string; type: "text" } | ImageContent>;
 	isError?: boolean;
 	structuredContent?: Record<string, unknown>;
 };
@@ -63,7 +66,6 @@ function createConciergeServer(
 		],
 		ctx,
 		executor: new DynamicWorkerExecutor({ loader: env.LOADER }),
-		transformResult: (result) => truncateResult(result),
 	});
 	const codeToolDescription = runtime.tool({
 		connectorHints: {
@@ -73,7 +75,7 @@ function createConciergeServer(
 			maps:
 				"Use maps.request for public businesses, places, ratings, hours, reviews, directions, travel times, distances, and route matrices through Places API (New) and Routes API. Prefer these APIs over reading Google Maps webpages for supported tasks. Consult official API documentation; pass field masks in query.fields. Requests may incur charges; select only needed fields and preserve Google Maps attribution.",
 			unifi:
-				"Use unifi.request for UniFi console discovery, networking/Wi-Fi clients and devices, and Protect camera/NVR status and settings through official cloud APIs. Start with GET /v1/hosts, then use console-specific Network/Protect integration paths. Permitted writes and deletes are supported; JSON only, no NAS files, camera images/video, or event streaming.",
+				"Use unifi.request for UniFi console discovery, networking/Wi-Fi clients and devices, Protect camera/NVR status and settings, and JPEG camera snapshots through official cloud APIs. Start with GET /v1/hosts, then use console-specific Network/Protect integration paths. Permitted writes and deletes are supported; no NAS files, video, or event streaming.",
 		},
 	}).description;
 
@@ -87,7 +89,7 @@ function createConciergeServer(
 			outputSchema: {
 				result: z
 					.unknown()
-					.describe("The single JSON-serializable value returned by the async function."),
+					.describe("The async function's returned value, with images represented by metadata referring to image blocks in content."),
 			},
 			annotations: {
 				readOnlyHint: false,
@@ -135,6 +137,7 @@ function createConciergeCodeToolDescription(defaultDescription: string) {
 		[
 			"The Code Mode result is the single value returned by the async function. Return any value the model should receive for later reasoning; console logs and intermediate values are not returned.",
 			"If multiple values are needed, return one object that contains them, e.g. `return { first, second };`.",
+			"Return connector image values unchanged, directly or nested in an object/array, e.g. `return { camera, snapshot };`. Only returned images are delivered as MCP image content; their positions in the JSON result contain type, mimeType, byteLength, and contentIndex (a zero-based index into MCP content). Do not stringify, base64-encode, or print image data. At most 4 images totaling 4 MiB may be returned per invocation; images are never text-truncated.",
 			"Large return values may be structurally truncated with `--- TRUNCATED ---` markers. Filter, project, or use native API pagination inside the function before returning; keep needed identifiers, status fields, and pagination metadata in the smaller result.",
 			"Do not treat truncated output as complete or reuse a truncated identifier or cursor. Retrieve a smaller result instead; output truncation does not undo any earlier writes.",
 		].join("\n"),
@@ -168,13 +171,21 @@ function appendMarkdownSection(markdown: string, heading: string, body: string) 
 	return `${markdown}\n\n## ${heading}\n\n${body}`;
 }
 
-function formatCodeToolOutput(output: ProxyToolOutput): TextToolResult {
+function formatCodeToolOutput(output: ProxyToolOutput): CodeToolResult {
 	if (output.status === "completed") {
-		const result = normalizeStructuredResult(output.result);
-		return {
-			content: [{ text: stringifyToolResult(output.result), type: "text" }],
-			structuredContent: { result },
-		};
+		try {
+			const { result, images } = prepareImageOutput(output.result);
+			const bounded = truncateResult(result);
+			return {
+				content: [{ text: stringifyToolResult(bounded), type: "text" }, ...images],
+				structuredContent: { result: normalizeStructuredResult(bounded) },
+			};
+		} catch {
+			return {
+				content: [{ type: "text", text: "Cannot deliver this result: return valid JPEG image values, at most 4 images totaling 4 MiB, and JSON-serializable data. Earlier connector calls may have succeeded; do not replay writes." }],
+				isError: true,
+			};
+		}
 	}
 
 	if (output.status === "paused") {
@@ -193,6 +204,22 @@ function formatCodeToolOutput(output: ProxyToolOutput): TextToolResult {
 		content: [{ text: output.error, type: "text" }],
 		isError: true,
 	};
+}
+
+function prepareImageOutput(value: unknown) {
+	const images: ImageContent[] = [];
+	let totalBytes = 0;
+	// Extract before upstream text truncation so binary data is neither clipped nor duplicated in JSON.
+	const json = JSON.stringify(value, (_key, nested: unknown) => {
+		if (!isConnectorImage(nested)) return nested;
+		totalBytes += nested.data.byteLength;
+		if (images.length >= 4 || totalBytes > 4 * 1024 * 1024 || !hasJpegSignature(nested.data)) {
+			throw new Error("Image output limit or signature check failed.");
+		}
+		images.push({ type: "image", mimeType: nested.mimeType, data: Buffer.from(nested.data).toString("base64") });
+		return { type: "image", mimeType: nested.mimeType, byteLength: nested.data.byteLength, contentIndex: images.length };
+	});
+	return { result: json === undefined ? undefined : JSON.parse(json) as unknown, images };
 }
 
 function stringifyToolResult(result: unknown) {

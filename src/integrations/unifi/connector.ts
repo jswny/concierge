@@ -22,20 +22,20 @@ export class UnifiConnector extends CodemodeConnector<Env> {
 
 	protected instructions() {
 		return [
-			"Use for pre-authenticated UniFi Site Manager, Network, and Protect JSON APIs through https://api.ui.com.",
+			"Use for pre-authenticated UniFi Site Manager, Network, and Protect APIs through https://api.ui.com, including JPEG camera snapshots.",
 			"Consult https://developer.ui.com for the installed application's API version, native methods, paths, query parameters, and bodies. The API does not expose every dashboard feature.",
 			"Discover consoles with GET /v1/hosts; preserve data, nextToken, and host id. A host is a console/controller, not each AP, switch, or camera. Host discovery does not guarantee proxy authorization.",
 			"Use /v1/connector/consoles/{consoleId}/proxy/network/integration/v1/ or /v1/connector/consoles/{consoleId}/proxy/protect/integration/v1/ for application calls. Encode each returned ID as a URL path segment. For Network, list local sites first at the network prefix plus sites, then use that local siteId for clients/devices/networks; do not substitute a Site Manager site ID.",
 			"Cloud Connector requires compatible console firmware (at least 5.0.3); personal keys can proxy only to consoles owned by the key's account. Credentials and API origin are server-owned.",
 			"Supports reads and writes permitted by the key. Configuration changes, device actions, and deletes can interrupt connectivity or change security settings. Failed calls do not undo earlier actions; never blindly replay a write with an unknown outcome.",
-			"Returns native JSON unchanged, including pagination and per-item outcomes, or null for empty responses. Only GET calls are automatically replay-safe. No NAS/Drive, legacy internal APIs, local-network access, image/video delivery, file transfer, or WebSocket event subscriptions.",
+			"Returns native JSON unchanged, including pagination and per-item outcomes, or null for empty responses. Protect GET cameras/{id}/snapshot returns a JPEG image value with Uint8Array data; return that value unchanged (directly or nested in an object/array) to deliver an MCP image. Do not stringify or base64-encode it. Only GET calls are automatically replay-safe. No video, other image formats, NAS/Drive, legacy internal APIs, local-network access, file transfer, or WebSocket event subscriptions.",
 		].join(" ");
 	}
 
 	protected tools(): ConnectorTools {
 		return {
 			request: {
-				description: "Call official UniFi APIs for console discovery and management of networking/Wi-Fi, connected clients, APs, switches, gateways, networks, camera/NVR status, and Protect settings and controls. Use native /v1/ Site Manager paths (start with GET /v1/hosts), or /v1/connector/consoles/{consoleId}/proxy/{network|protect}/integration/v1/... for application calls. Encode IDs as path segments. Network siteId values come from the console's Network sites, not Site Manager. Consult developer.ui.com for supported endpoints and installed versions. Authentication is server-owned; permitted writes/deletes are supported and can disrupt network/security settings. Returns native JSON and pagination unchanged, or null for empty responses. JSON HTTP only; no NAS/Drive, legacy API, images/video, or event streaming.",
+				description: "Call official UniFi APIs for console discovery and management of networking/Wi-Fi, connected clients, APs, switches, gateways, networks, camera/NVR status, Protect settings and controls, and JPEG camera snapshots. Use native /v1/ Site Manager paths (start with GET /v1/hosts), or /v1/connector/consoles/{consoleId}/proxy/{network|protect}/integration/v1/... for application calls. Encode IDs as path segments. Network siteId values come from the console's Network sites, not Site Manager. Consult developer.ui.com for supported endpoints and installed versions. Authentication is server-owned; permitted writes/deletes are supported and can disrupt network/security settings. Returns native JSON and pagination unchanged, null for empty responses, or an image value for Protect cameras/{id}/snapshot (image/jpeg). Return image values unchanged, directly or nested in an object/array, to deliver MCP images; do not stringify or base64-encode them. No video, other image formats, NAS/Drive, legacy API, or event streaming.",
 				inputSchema: requestInputSchema,
 				execute: async (args) => {
 					const options = parseApiRequest(requestSchema, args);
@@ -54,6 +54,7 @@ export class UnifiConnector extends CodemodeConnector<Env> {
 						readOnly: options.method === "GET",
 						url,
 						method: options.method,
+						format: "json-or-image",
 						headers: { "X-API-Key": this.env.UNIFI_API_KEY },
 						body: options.body === undefined ? undefined : JSON.stringify(options.body),
 						classifyError: classifyUnifiError,

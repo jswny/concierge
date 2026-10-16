@@ -33,6 +33,10 @@ type TextToolResult = {
 
 const MCP_ALLOWED_HOSTNAMES = ["concierge.j1.io", "localhost", "127.0.0.1", "[::1]"];
 const MCP_ICONS = [{
+	src: "https://concierge.j1.io/assets/concierge.png",
+	mimeType: "image/png",
+	sizes: ["256x256"],
+}, {
 	src: "https://concierge.j1.io/assets/concierge.svg",
 	mimeType: "image/svg+xml",
 	sizes: ["any"],

@@ -21,8 +21,10 @@ test("Vite preserves the production configuration without enabling local debug",
 	const { directory: inputAssetDirectory, ...inputAssets } = input.assets;
 	const { directory: outputAssetDirectory, ...outputAssets } = output.assets;
 	assert.deepEqual(outputAssets, inputAssets);
-	assert.equal(readFileSync(new URL(`${outputAssetDirectory}/assets/concierge.svg`, new URL("../dist/concierge/", import.meta.url)), "utf8"),
-		readFileSync(new URL(`${inputAssetDirectory}/assets/concierge.svg`, new URL("../", import.meta.url)), "utf8"));
+	for (const extension of ["svg", "png"]) {
+		assert.deepEqual(readFileSync(new URL(`${outputAssetDirectory}/assets/concierge.${extension}`, new URL("../dist/concierge/", import.meta.url))),
+			readFileSync(new URL(`${inputAssetDirectory}/assets/concierge.${extension}`, new URL("../", import.meta.url))));
+	}
 	assert.notEqual(output.vars.CONCIERGE_DEBUG, "true");
 	assert.equal(output.main, "index.js");
 	assert.equal(output.no_bundle, true);
@@ -55,6 +57,10 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		assert.equal(logo.status, 200);
 		assert.match(logo.headers.get("Content-Type"), /^image\/svg\+xml/);
 		assert.equal(await logo.text(), readFileSync(new URL("../public/assets/concierge.svg", import.meta.url), "utf8"));
+		const png = await harness.fetch("/assets/concierge.png");
+		assert.equal(png.status, 200);
+		assert.match(png.headers.get("Content-Type"), /^image\/png/);
+		assert.deepEqual(Buffer.from(await png.arrayBuffer()), readFileSync(new URL("../public/assets/concierge.png", import.meta.url)));
 		const protectedResponse = await worker.fetch("https://concierge.j1.io/mcp", { method: "POST" });
 		assert.equal(protectedResponse.status, 401);
 		await client.connect(new StreamableHTTPClientTransport(new URL("/debug/mcp", listener.url), {
@@ -64,7 +70,10 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		const tools = (await client.listTools()).tools;
 		assert.deepEqual(tools.map((tool) => tool.name), ["code"]);
 		assert.equal(tools[0].icons, undefined);
-		assert.deepEqual(client.getServerVersion().icons, [{ src: "https://concierge.j1.io/assets/concierge.svg", mimeType: "image/svg+xml", sizes: ["any"] }]);
+		assert.deepEqual(client.getServerVersion().icons, [
+			{ src: "https://concierge.j1.io/assets/concierge.png", mimeType: "image/png", sizes: ["256x256"] },
+			{ src: "https://concierge.j1.io/assets/concierge.svg", mimeType: "image/svg+xml", sizes: ["any"] },
+		]);
 		assert.match(tools[0].description, /- `maps`.*Routes API/);
 		assert.match(tools[0].description, /- `google`.*Gmail/);
 		assert.match(tools[0].description, /- `unifi`.*unifi\.request/);

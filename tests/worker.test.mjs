@@ -11,7 +11,10 @@ import { createTestHarness } from "wrangler";
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const MODERN_PROTOCOL_VERSION = "2026-07-28";
 const LEGACY_PROTOCOL_VERSION = "2025-11-25";
-const MCP_ICONS = [{ src: "https://concierge.j1.io/assets/concierge.svg", mimeType: "image/svg+xml", sizes: ["any"] }];
+const MCP_ICONS = [
+	{ src: "https://concierge.j1.io/assets/concierge.png", mimeType: "image/png", sizes: ["256x256"] },
+	{ src: "https://concierge.j1.io/assets/concierge.svg", mimeType: "image/svg+xml", sizes: ["any"] },
+];
 const GOOGLE_KEYS = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const ACCESS_ISSUER = "https://access.example/cdn-cgi/access/sso/oidc/test-access-client";
 const GOOGLE_CREDENTIALS = {
@@ -87,7 +90,7 @@ test("advertises CIMD without dynamic client registration", async () => {
 	assert.deepEqual(resourceMetadata.bearer_methods_supported, ["header"]);
 });
 
-test("serves only the public logo asset without OAuth", async () => {
+test("serves only the public logo assets without OAuth", async () => {
 	const response = await productionServer.fetch("/assets/concierge.svg");
 	assert.equal(response.status, 200);
 	assert.match(response.headers.get("Content-Type"), /^image\/svg\+xml/);
@@ -96,11 +99,23 @@ test("serves only the public logo asset without OAuth", async () => {
 	const svg = await response.text();
 	assert.match(svg, /<title id="title">Concierge<\/title>/);
 	assert.doesNotMatch(svg, /<script|https?:\/\/(?!www\.w3\.org\/2000\/svg)/);
-	const head = await productionServer.fetch("/assets/concierge.svg", { method: "HEAD" });
-	assert.equal(head.status, 200);
-	assert.equal(await head.text(), "");
-	const post = await productionServer.fetch("/assets/concierge.svg", { method: "POST" });
-	assert.ok([404, 405].includes(post.status));
+	const pngResponse = await productionServer.fetch("/assets/concierge.png");
+	assert.equal(pngResponse.status, 200);
+	assert.match(pngResponse.headers.get("Content-Type"), /^image\/png/);
+	assert.equal(pngResponse.headers.has("Set-Cookie"), false);
+	assert.equal(pngResponse.headers.has("WWW-Authenticate"), false);
+	const png = Buffer.from(await pngResponse.arrayBuffer());
+	assert.deepEqual(png.subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+	assert.equal(png.readUInt32BE(16), 256);
+	assert.equal(png.readUInt32BE(20), 256);
+	assert.ok(png.length <= 10_000, "PNG must fit ChatGPT's 10 kB upload limit.");
+	for (const path of ["/assets/concierge.svg", "/assets/concierge.png"]) {
+		const head = await productionServer.fetch(path, { method: "HEAD" });
+		assert.equal(head.status, 200);
+		assert.equal(await head.text(), "");
+		const post = await productionServer.fetch(path, { method: "POST" });
+		assert.ok([404, 405].includes(post.status));
+	}
 	for (const path of ["/assets/missing.svg", "/assets/", "/assets/../src/index.ts"]) {
 		assert.equal((await productionServer.fetch(path)).status, 404, path);
 	}

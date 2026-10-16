@@ -1,7 +1,9 @@
-import { IMAGE_MIME_TYPE, hasJpegSignature, type ConnectorImage } from "./connector-images";
+import type { ConnectorImage } from "./connector-images";
+import {
+	RESPONSE_TYPES, parseMediaType, responseAccept, responseTypeFor, supportedResponseTypes, type ResponseFormat,
+} from "./response-formats";
 
 export type QueryValue = boolean | number | string | Array<boolean | number | string>;
-type ResponseFormat = "json" | "json-or-text" | "json-or-image";
 type ErrorCategory =
 	| "authentication"
 	| "permission"
@@ -212,10 +214,9 @@ export class ConnectorRequests {
 				typeof options.headers === "function" ? await options.headers() : options.headers,
 			);
 			const body = typeof options.body === "function" ? await options.body() : options.body;
-			headers.set("Accept", options.format === "json-or-image"
-				? `application/json, ${IMAGE_MIME_TYPE}` : "application/json");
+			headers.set("Accept", responseAccept(options.format));
 			if (options.body !== undefined && !headers.has("Content-Type"))
-				headers.set("Content-Type", "application/json");
+				headers.set("Content-Type", RESPONSE_TYPES.json.mimeType);
 			attempt.signal.throwIfAborted();
 			attempt.dispatch();
 			const response = await fetch(options.url, {
@@ -266,13 +267,9 @@ export class ConnectorRequests {
 	): Promise<unknown> {
 		if (!response.body) return null;
 		const contentType = response.headers.get("Content-Type");
-		const mediaType = contentType?.split(";", 1)[0].trim().toLowerCase();
-		const validMediaType = mediaType && mediaType.length <= 127 &&
-			/^[-!#$%&'*+.^_`|~0-9a-z]+\/[-!#$%&'*+.^_`|~0-9a-z]+$/.test(mediaType);
-		const isJson = validMediaType && mediaType.startsWith("application/") &&
-			(mediaType === "application/json" || mediaType.endsWith("+json"));
-		const isImage = format === "json-or-image" && mediaType === IMAGE_MIME_TYPE;
-		const unsupported = format !== "json-or-text" && contentType !== null && !isJson && !isImage;
+		const mediaType = parseMediaType(contentType);
+		const responseType = responseTypeFor(mediaType, format);
+		const unsupported = format !== "json-or-text" && contentType !== null && !responseType;
 		const reader = response.body.getReader();
 		const chunks: Uint8Array[] = [];
 		let size = 0;
@@ -283,7 +280,7 @@ export class ConnectorRequests {
 				// Wait for actual bytes so empty successes still return null, regardless of headers.
 				if (value.byteLength && unsupported) throw new ConnectorError({
 					category: "unsupported_response",
-					message: `Upstream returned an unsupported response format${validMediaType ? ` (${mediaType})` : ""}; this connector accepts ${format === "json-or-image" ? `JSON or ${IMAGE_MIME_TYPE}` : "JSON only"}.`,
+					message: `Upstream returned an unsupported response format${mediaType ? ` (${mediaType})` : ""}; this connector accepts ${supportedResponseTypes(format)}.`,
 				});
 				size += value.byteLength;
 				if (size > maxBytes)
@@ -305,12 +302,12 @@ export class ConnectorRequests {
 			bytes.set(chunk, offset);
 			offset += chunk.byteLength;
 		}
-		if (isImage) {
-			if (!hasJpegSignature(bytes)) throw new ConnectorError({
+		if (responseType?.kind === "image") {
+			if (!responseType.validate(bytes)) throw new ConnectorError({
 				category: "invalid_response",
-				message: "Upstream returned invalid JPEG image data.",
+				message: `Upstream returned invalid ${responseType.label}.`,
 			});
-			return { type: "image", mimeType: IMAGE_MIME_TYPE, data: bytes } satisfies ConnectorImage;
+			return { type: "image", mimeType: responseType.mimeType, data: bytes } satisfies ConnectorImage;
 		}
 		const text = new TextDecoder().decode(bytes);
 		if (!text) return null;
@@ -320,7 +317,7 @@ export class ConnectorRequests {
 			if (format === "json-or-text") return text;
 			throw new ConnectorError({
 				category: "invalid_response",
-				message: "Upstream returned invalid JSON.",
+				message: `Upstream returned invalid ${RESPONSE_TYPES.json.label}.`,
 			});
 		}
 	}

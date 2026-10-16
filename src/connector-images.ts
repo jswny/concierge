@@ -1,8 +1,8 @@
-export const IMAGE_MIME_TYPE = "image/jpeg";
+import { isImageMimeType, type ImageMimeType } from "./response-formats";
 
 export type ConnectorImage = {
 	type: "image";
-	mimeType: typeof IMAGE_MIME_TYPE;
+	mimeType: ImageMimeType;
 	data: Uint8Array;
 };
 
@@ -40,18 +40,14 @@ export class ConnectorImages {
 export function isImageReference(value: unknown): value is ImageReference {
 	return typeof value === "object" && value !== null &&
 		"type" in value && value.type === "image" &&
-		"mimeType" in value && value.mimeType === IMAGE_MIME_TYPE &&
+		"mimeType" in value && isImageMimeType(value.mimeType) &&
 		"imageId" in value && typeof value.imageId === "string" &&
 		"byteLength" in value && typeof value.byteLength === "number";
-}
-
-export function hasJpegSignature(bytes: Uint8Array) {
-	return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
 }
 
 export function isConnectorImage(value: unknown): value is ConnectorImage {
 	return typeof value === "object" && value !== null &&
 		"type" in value && value.type === "image" &&
-		"mimeType" in value && value.mimeType === IMAGE_MIME_TYPE &&
+		"mimeType" in value && isImageMimeType(value.mimeType) &&
 		"data" in value && value.data instanceof Uint8Array;
 }

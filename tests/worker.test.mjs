@@ -1423,7 +1423,7 @@ test("UniFi rejects redirects and unsupported media without exposing response bo
 				assert.equal(result.isError, true);
 				assert.equal(calls, 1);
 				assert.match(result.content[0].text, currentMode === "media"
-					? /unsupported response format \(video\/mp4\).*JSON or image\/jpeg.*unsupported_response/
+					? /unsupported response format \(video\/mp4\).*application\/json.*image\/jpeg.*unsupported_response/
 					: /HTTP 302/);
 				assert.doesNotMatch(JSON.stringify(result), /private-image-data|test-unifi-api-key/);
 			}
@@ -2029,14 +2029,38 @@ test("shares bounded reliability behavior across connector operations", async (t
 		assert.equal(large.cancelled, true);
 		assert.equal(large.results[0].details.category, "response_too_large");
 	});
+	await t.test("derives request headers and advertised MIME support from the response registry", async () => {
+		const originalFetch = globalThis.fetch;
+		try {
+			for (const format of ["json", "json-or-text", "json-or-image"]) {
+				const formats = await run({ action: "formats", format });
+				assert.deepEqual(formats.types, [
+					{ kind: "json", mimeType: "application/json" },
+					{ kind: "image", mimeType: "image/jpeg" },
+				]);
+				const supported = formats.types.filter((type) => type.kind === "json" || format === "json-or-image");
+				assert.equal(formats.accept, supported.map((type) => type.mimeType).join(", "));
+				for (const type of supported) assert.ok(formats.description.includes(type.mimeType));
+				if (format !== "json-or-image") assert.ok(!formats.description.includes("image/jpeg"));
+				globalThis.fetch = async (input, init) => {
+					const request = new Request(input, init);
+					assert.equal(request.headers.get("Accept"), formats.accept);
+					return Response.json({ unchanged: true });
+				};
+				assert.deepEqual((await run({ action: "request", format })).result, { unchanged: true });
+			}
+		} finally { globalThis.fetch = originalFetch; }
+	});
 	await t.test("rejects unsupported formats without buffering media or replaying successful writes", async () => {
+		const formats = await run({ action: "formats" });
 		for (const contentType of ["IMAGE/JPEG; filename=private-header", "image/png", "text/html", "application/octet-stream", "not a media type private-header"]) {
 			const result = await run({ action: "body", readOnly: false, body: "private-response-body", headers: { "Content-Type": contentType } });
 			assert.equal(result.cancelled, true);
 			assert.equal(result.attempts, 1);
 			assert.equal(result.results[0].details.category, "unsupported_response");
 			assert.equal(result.results[0].details.outcome, "succeeded");
-			assert.match(result.results[0].error, /JSON only.*retryable=false.*safe_to_replay=false.*outcome=succeeded/);
+			assert.ok(result.results[0].error.includes(`this connector accepts ${formats.description}.`));
+			assert.match(result.results[0].error, /retryable=false.*safe_to_replay=false.*outcome=succeeded/);
 			assert.doesNotMatch(JSON.stringify(result), /private-response-body|private-header|invalid JSON/);
 			if (contentType.startsWith("IMAGE")) assert.match(result.results[0].error, /\(image\/jpeg\)/);
 		}
@@ -2060,6 +2084,9 @@ test("shares bounded reliability behavior across connector operations", async (t
 		const image = await run({ ...options, closeBody: true });
 		assert.equal(image.results[0].result.mimeType, "image/jpeg");
 		assert.deepEqual(Buffer.from(Object.values(image.results[0].result.data)), JPEG);
+		const parameterized = await run({ ...options, closeBody: true, headers: { "Content-Type": "IMAGE/JPEG; filename=private-header" } });
+		assert.equal(parameterized.results[0].result.mimeType, "image/jpeg");
+		assert.deepEqual(Buffer.from(Object.values(parameterized.results[0].result.data)), JPEG);
 		const large = await run({ ...options, limits: { maxResponseBytes: JPEG.length - 1 } });
 		assert.equal(large.cancelled, true);
 		assert.equal(large.results[0].details.category, "response_too_large");
@@ -2070,6 +2097,8 @@ test("shares bounded reliability behavior across connector operations", async (t
 		const video = await run({ ...options, headers: { "Content-Type": "video/mp4" } });
 		assert.equal(video.cancelled, true);
 		assert.equal(video.results[0].details.category, "unsupported_response");
+		const formats = await run({ action: "formats", format: "json-or-image" });
+		assert.ok(video.results[0].error.includes(`this connector accepts ${formats.description}.`));
 		const json = await run({ action: "body", format: "json-or-image", closeBody: true, body: '{"native":true}', headers: { "Content-Type": "application/json" } });
 		assert.deepEqual(json.results[0].result, { native: true });
 	});

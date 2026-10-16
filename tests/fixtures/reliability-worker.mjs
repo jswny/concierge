@@ -6,6 +6,7 @@ import {
 } from "../../src/connector-requests.ts";
 import { z } from "zod";
 import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../src/connector-inputs.ts";
+import { RESPONSE_TYPES, responseAccept, supportedResponseTypes } from "../../src/response-formats.ts";
 
 export default {
 	async fetch(request) {
@@ -27,6 +28,11 @@ export default {
 		const originalLog = console.log;
 		if (options.loggingFailure) console.log = () => { throw new Error("test logging failure"); };
 		try {
+			if (options.action === "formats") return Response.json({
+				types: Object.values(RESPONSE_TYPES).map(({ kind, mimeType }) => ({ kind, mimeType })),
+				accept: responseAccept(options.format),
+				description: supportedResponseTypes(options.format ?? "json"),
+			});
 			if (options.action === "inputs") {
 				const base = apiRequestSchema(options.contract);
 				const schema = options.contract.extraKeys?.includes("service")

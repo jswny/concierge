@@ -4,6 +4,7 @@ import { UsageLog } from "../../usage-logging";
 import { ConnectorRequests, createApiUrl, isRecord, type ApiFailure } from "../../connector-requests";
 import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../connector-inputs";
 import { ConnectorImages, isConnectorImage } from "../../connector-images";
+import { RESPONSE_TYPES } from "../../response-formats";
 
 const API_ORIGIN = "https://api.ui.com";
 const PROXY_PATH = /^\/v1\/connector\/consoles\/[^/]+\/proxy\/(network|protect)\/integration\/v1\//;
@@ -38,7 +39,7 @@ export class UnifiConnector extends ObservedConnector<Env> {
 	protected tools(): ConnectorTools {
 		return {
 			request: {
-				description: "Call official UniFi APIs for console discovery and management of networking/Wi-Fi, connected clients, APs, switches, gateways, networks, camera/NVR status, Protect settings and controls, and JPEG camera snapshots. Use native /v1/ Site Manager paths (start with GET /v1/hosts), or /v1/connector/consoles/{consoleId}/proxy/{network|protect}/integration/v1/... for application calls. Encode IDs as path segments. Network siteId values come from the console's Network sites, not Site Manager. Consult developer.ui.com for supported endpoints and installed versions. Authentication is server-owned; permitted writes/deletes are supported and can disrupt network/security settings. Returns native JSON and pagination unchanged, null for empty responses, or an opaque image reference for Protect cameras/{id}/snapshot (image/jpeg). Return image references unchanged, directly or nested in an object/array, in the same invocation to deliver MCP images. No raw image bytes in Code Mode; do not stringify references or reuse them across invocations. Retrieve at most four images totaling 4 MiB per invocation. No video, other image formats, NAS/Drive, legacy API, or event streaming.",
+				description: `Call official UniFi APIs for console discovery and management of networking/Wi-Fi, connected clients, APs, switches, gateways, networks, camera/NVR status, Protect settings and controls, and JPEG camera snapshots. Use native /v1/ Site Manager paths (start with GET /v1/hosts), or /v1/connector/consoles/{consoleId}/proxy/{network|protect}/integration/v1/... for application calls. Encode IDs as path segments. Network siteId values come from the console's Network sites, not Site Manager. Consult developer.ui.com for supported endpoints and installed versions. Authentication is server-owned; permitted writes/deletes are supported and can disrupt network/security settings. Returns native JSON and pagination unchanged, null for empty responses, or an opaque image reference for Protect cameras/{id}/snapshot (${RESPONSE_TYPES.jpeg.mimeType}). Return image references unchanged, directly or nested in an object/array, in the same invocation to deliver MCP images. No raw image bytes in Code Mode; do not stringify references or reuse them across invocations. Retrieve at most four images totaling 4 MiB per invocation. No video, other image formats, NAS/Drive, legacy API, or event streaming.`,
 				inputSchema: requestInputSchema,
 				execute: async (args, execution) => {
 					const options = parseApiRequest(requestSchema, args);

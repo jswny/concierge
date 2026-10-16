@@ -20,6 +20,7 @@ import { ConnectorRequests } from "./connector-requests";
 import { boundMcpRequest, MAX_CODE_CHARS } from "./mcp-requests";
 import { observeCodeExecution } from "./code-execution";
 import { ConnectorImages, isImageReference } from "./connector-images";
+import { UsageLog } from "./usage-logging";
 
 export { CodemodeRuntime } from "@cloudflare/codemode";
 
@@ -52,6 +53,7 @@ function createConciergeServer(
 	requests: ConnectorRequests,
 ) {
 	const images = new ConnectorImages();
+	const usage = new UsageLog();
 	const server = new McpServer({
 		name: "Concierge MCP",
 		version: "1.0.0",
@@ -60,10 +62,10 @@ function createConciergeServer(
 	server.server.registerCapabilities({ tools: { listChanged: false } });
 	const runtime = createCodemodeRuntime({
 		connectors: [
-			new CloudflareConnector(ctx, env, requests),
-			new GoogleConnector(ctx, env, googleAuth, requests),
-			new MapsConnector(ctx, env, requests),
-			new UnifiConnector(ctx, env, requests, images),
+			new CloudflareConnector(ctx, env, requests, usage),
+			new GoogleConnector(ctx, env, googleAuth, requests, usage),
+			new MapsConnector(ctx, env, requests, usage),
+			new UnifiConnector(ctx, env, requests, images, usage),
 		],
 		ctx,
 		executor: new DynamicWorkerExecutor({ loader: env.LOADER }),
@@ -99,14 +101,13 @@ function createConciergeServer(
 				openWorldHint: true,
 			},
 		},
-		async ({ code }) => {
-			const output = await observeCodeExecution(() => runtime.execute({ code }));
+		async ({ code }) => observeCodeExecution(() => runtime.execute({ code }), (output) => {
 			try {
 				return formatCodeToolOutput(output, images);
 			} finally {
 				images.clear(output.executionId);
 			}
-		},
+		}, usage),
 	);
 
 	return server;

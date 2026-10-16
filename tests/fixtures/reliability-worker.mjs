@@ -24,6 +24,8 @@ export default {
 		let failuresRemaining = options.failuresBeforeSuccess ?? Infinity;
 		const dispatchTimes = [];
 		const pendingWork = [];
+		const originalLog = console.log;
+		if (options.loggingFailure) console.log = () => { throw new Error("test logging failure"); };
 		try {
 			if (options.action === "inputs") {
 				const base = apiRequestSchema(options.contract);
@@ -113,6 +115,8 @@ export default {
 			});
 		} catch (error) {
 			return Response.json({ error: error.message, details: error.details });
+		} finally {
+			console.log = originalLog;
 		}
 	},
 };

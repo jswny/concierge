@@ -1,4 +1,6 @@
-import { CodemodeConnector, type ConnectorTools } from "@cloudflare/codemode";
+import type { ConnectorTools } from "@cloudflare/codemode";
+import { ObservedConnector } from "../../observed-connector";
+import { UsageLog } from "../../usage-logging";
 import { z } from "zod";
 import { GoogleWorkspaceAuth } from "./auth";
 import { ConnectorRequests, createApiUrl, isRecord, type ApiFailure } from "../../connector-requests";
@@ -26,9 +28,9 @@ const requestSchema = apiRequestSchema({
 const requestInputSchema = toToolInputSchema(requestSchema);
 type GoogleRequest = z.infer<typeof requestSchema>;
 
-export class GoogleConnector extends CodemodeConnector<Env> {
-	constructor(ctx: DurableObjectState, env: Env, private readonly auth: GoogleWorkspaceAuth, private readonly requests: ConnectorRequests) {
-		super(ctx, env);
+export class GoogleConnector extends ObservedConnector<Env> {
+	constructor(ctx: DurableObjectState, env: Env, private readonly auth: GoogleWorkspaceAuth, private readonly requests: ConnectorRequests, usage: UsageLog) {
+		super(ctx, env, usage);
 	}
 
 	name() {

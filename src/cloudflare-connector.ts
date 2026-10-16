@@ -1,4 +1,6 @@
-import { CodemodeConnector, type ConnectorTools } from "@cloudflare/codemode";
+import type { ConnectorTools } from "@cloudflare/codemode";
+import { ObservedConnector } from "./observed-connector";
+import { UsageLog } from "./usage-logging";
 import { z } from "zod";
 import { ConnectorError, ConnectorRequests, isRecord, type ApiFailure } from "./connector-requests";
 import { toToolInputSchema } from "./connector-inputs";
@@ -33,9 +35,9 @@ const markdownOutputSchema = toToolInputSchema(z.strictObject({
 	contentHash: z.string(),
 }));
 
-export class CloudflareConnector extends CodemodeConnector<Env> {
-	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests) {
-		super(ctx, env);
+export class CloudflareConnector extends ObservedConnector<Env> {
+	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests, usage: UsageLog) {
+		super(ctx, env, usage);
 	}
 
 	name() {

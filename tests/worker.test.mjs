@@ -839,7 +839,7 @@ test("preserves structured large results when Code Mode truncates them", async (
 	});
 });
 
-test("records metadata-only Code Mode telemetry for success and pre-connector failures", async () => {
+test("records correlated operational metadata without source, results or exception messages", async () => {
 	debugServer.clearLogs();
 	await withMcpClient(undefined, async (client) => {
 		for (const [code, isError] of [
@@ -862,11 +862,25 @@ test("records metadata-only Code Mode telemetry for success and pre-connector fa
 	assert.equal(events.length, 4, JSON.stringify(logs));
 	assert.deepEqual(events.map((event) => event.status), ["completed", "error", "error", "completed"]);
 	assert.deepEqual(events.map((event) => event.connectorCalls), [0, 0, 0, 1]);
+	assert.deepEqual(events.map((event) => event.mcpStatus), ["success", "error", "error", "success"]);
+	assert.equal(new Set(events.map((event) => event.invocationId)).size, 4);
 	for (const event of events) {
-		assert.deepEqual(Object.keys(event).sort(), ["connectorCalls", "durationMs", "event", "status"]);
+		assert.equal(typeof event.executionId, "string");
 		assert.ok(Number.isFinite(event.durationMs) && event.durationMs >= 0);
+		assert.deepEqual(Object.keys(event).sort(), ["event", "invocationId", "executionId", "durationMs", "status", "mcpStatus", "connectorCalls"].sort());
 	}
-	assert.doesNotMatch(JSON.stringify(events), /private|async|throw|syntax/);
+	const usage = logs.flatMap((log) => log.message ?? []).filter((message) => typeof message === "string" && message.startsWith('{"event":"code_')).map((message) => JSON.parse(message));
+	assert.equal(usage.length, 5);
+	assert.doesNotMatch(JSON.stringify(usage), /private returned content|private exception content|private_source_marker|example\.com|networkidle2/);
+	const connector = usage.find((event) => event.event === "code_connector_call");
+	assert.equal(connector.invocationId, events[3].invocationId);
+	assert.equal(connector.executionId, events[3].executionId);
+	assert.equal(connector.connector, "cloudflare");
+	assert.equal(connector.method, "read_webpage_as_markdown");
+	assert.equal(connector.status, "success");
+	assert.equal(connector.sequence, 0);
+	assert.ok(Number.isFinite(connector.durationMs) && connector.durationMs >= 0);
+	assert.deepEqual(Object.keys(connector).sort(), ["event", "invocationId", "executionId", "connector", "method", "sequence", "status", "durationMs"].sort());
 });
 
 test("keeps Code Mode outcomes unchanged when telemetry fails", async () => {
@@ -878,19 +892,22 @@ test("keeps Code Mode outcomes unchanged when telemetry fails", async () => {
 		const output = {
 			status, executionId: "private execution id",
 			result: { secret: "private result" }, error: "private error", logs: ["private sandbox log"],
-			calls: [{ path: "private method", args: { token: "private token" } }],
+			calls: [{ seq: 0, connector: "test", method: "request", state: "applied", args: { token: "private token" } }],
 		};
+		const response = { content: [{ type: "text", text: "client response" }], ...(status === "completed" ? {} : { isError: true }) };
 		for (const loggingFailure of [false, true]) {
-			const result = await run({ output, loggingFailure });
+			const result = await run({ output, response, loggingFailure });
 			assert.equal(result.sameReference, true);
-			assert.deepEqual(result.result, output);
+			assert.deepEqual(result.result, response);
 			assert.equal(result.executions, 1);
-			assert.equal(result.logs.length, loggingFailure ? 0 : 1);
+			assert.equal(result.logs.length === 0, loggingFailure);
 			if (!loggingFailure) {
-				assert.equal(result.logs[0].status, status);
-				assert.equal(result.logs[0].connectorCalls, 1);
-				assert.deepEqual(Object.keys(result.logs[0]).sort(), ["connectorCalls", "durationMs", "event", "status"]);
-				assert.doesNotMatch(JSON.stringify(result.logs), /private|token|args|result|executionId/);
+				const summary = result.logs.find((event) => event.event === "code_execution");
+				assert.equal(summary.status, status);
+				assert.equal(summary.connectorCalls, 1);
+				assert.equal(summary.executionId, output.executionId);
+				assert.equal(summary.mcpStatus, status === "completed" ? "success" : "error");
+				assert.doesNotMatch(JSON.stringify(result.logs), /private token|private sandbox log|private result|private error|client response/);
 			}
 		}
 	}
@@ -898,13 +915,143 @@ test("keeps Code Mode outcomes unchanged when telemetry fails", async () => {
 		const result = await run({ throw: true, loggingFailure });
 		assert.equal(result.error, "private exception must not be logged");
 		assert.equal(result.executions, 1);
-		assert.equal(result.logs.length, loggingFailure ? 0 : 1);
+		assert.equal(result.logs.length === 0, loggingFailure);
 		if (!loggingFailure) {
-			assert.equal(result.logs[0].status, "exception");
-			assert.equal(Object.hasOwn(result.logs[0], "connectorCalls"), false);
-			assert.doesNotMatch(JSON.stringify(result.logs), /private/);
+			const summary = result.logs.find((event) => event.event === "code_execution");
+			assert.equal(summary.status, "exception");
+			assert.equal(summary.mcpStatus, "exception");
+			assert.equal(summary.connectorCalls, 0);
+			assert.doesNotMatch(JSON.stringify(result.logs), /private exception must not be logged/);
 		}
 	}
+});
+
+test("excludes all connector and MCP payloads and reports output-assembly failures", async () => {
+	const fixture = debugServer.getWorker("mcp-infrastructure-test");
+	const run = async (options) => (await fixture.fetch("/", {
+		method: "POST", body: JSON.stringify({ action: "telemetry", ...options }),
+	})).json();
+	const completed = { status: "completed", executionId: "exec-fixture", calls: [], result: true };
+	const response = { structuredContent: { result: {
+		personal: "private personal data", access_token: "fixture-access-token", nextToken: "native-pagination",
+		password: "fixture-password", providerKey: "worker-key-to-redact", image: { type: "image", mimeType: "image/jpeg", data: JPEG_BASE64 },
+	} }, content: [{ type: "image", mimeType: "image/jpeg", data: JPEG_BASE64 }] };
+	const recorded = await run({ output: completed, response });
+	assert.deepEqual(recorded.result, response, "Logging must not mutate the client-visible response.");
+	assert.equal(recorded.logs.length, 1);
+	const logs = JSON.stringify(recorded.logs);
+	assert.doesNotMatch(logs, /private personal data|native-pagination|fixture-access-token|fixture-password|worker-key-to-redact/);
+	assert.ok(!logs.includes(JPEG_BASE64));
+	const large = "\u00e9".repeat(80_000);
+	const oversized = await run({
+		output: { ...completed, calls: Array.from({ length: 40 }, (_, seq) => ({
+			seq, connector: "test", method: "request", state: "applied", args: { query: large }, result: { body: large },
+		})) }, response: { structuredContent: { result: large } },
+	});
+	const totalBytes = oversized.logs.reduce((total, event) => total + Buffer.byteLength(JSON.stringify(event)), 0);
+	assert.ok(totalBytes < 16 * 1024, totalBytes);
+	assert.equal(oversized.logs.length, 41);
+	const summary = oversized.logs.at(-1);
+	assert.equal(summary.event, "code_execution");
+	assert.equal(summary.connectorCalls, 40);
+	assert.doesNotMatch(JSON.stringify(oversized.logs), /payload|query|body|\u00e9/);
+	assert.equal(oversized.result.structuredContent.result, large);
+	const failedOutput = await run({ output: completed, formatThrow: true });
+	assert.equal(failedOutput.executions, 1);
+	assert.equal(failedOutput.error, "output formatting failure");
+	assert.equal(failedOutput.logs.at(-1).status, "completed");
+	assert.equal(failedOutput.logs.at(-1).mcpStatus, "exception");
+});
+
+test("traces execution and connector outcomes without replaying work when tracing fails", async () => {
+	const fixture = debugServer.getWorker("mcp-infrastructure-test");
+	const output = { status: "completed", executionId: "exec-trace-fixture", calls: [
+		{ seq: 0, connector: "test", method: "request", state: "applied", args: {}, result: { ok: true } },
+	] };
+	const run = async (options) => (await fixture.fetch("/", {
+		method: "POST", body: JSON.stringify({ action: "telemetry", output, response: { isError: true }, ...options }),
+	})).json();
+	const recorded = await run({ mockTracing: true });
+	assert.deepEqual(recorded.spans.map((span) => span.name), ["mcp.code", "connector.test.request"]);
+	assert.deepEqual(recorded.spans.map((span) => span.status.code), ["error", "ok"]);
+	const summary = recorded.logs.at(-1);
+	assert.equal(summary.status, "completed");
+	assert.equal(summary.mcpStatus, "error");
+	for (const span of recorded.spans) {
+		assert.equal(span.attributes["concierge.invocation_id"], summary.invocationId);
+		assert.equal(span.attributes["concierge.execution_id"], output.executionId);
+		assert.doesNotMatch(JSON.stringify(span.attributes), /payload|args|result|async/);
+	}
+	for (const tracingFailure of ["before", "after"]) {
+		const success = await run({ tracingFailure, response: { content: [{ type: "text", text: "unchanged" }] } });
+		assert.equal(success.executions, 1);
+		assert.equal(success.sameReference, true);
+		assert.equal(success.logs.filter((event) => event.event === "code_connector_call").length, 1);
+		assert.equal(success.logs.filter((event) => event.event === "code_execution").length, 1);
+		const failed = await run({ tracingFailure, connectorThrow: "provider rejected operation" });
+		assert.equal(failed.executions, 1);
+		assert.equal(failed.error, "provider rejected operation");
+		assert.equal(failed.logs.filter((event) => event.event === "code_connector_call").length, 1);
+		assert.equal(failed.logs.find((event) => event.event === "code_connector_call").status, "error");
+		assert.equal(failed.logs.at(-1).connectorCalls, 1);
+	}
+});
+
+test("keeps usage correlation isolated across concurrent MCP invocations", async () => {
+	debugServer.clearLogs();
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = async (input, init) => {
+		const url = new URL(new Request(input, init).url);
+		if (url.hostname !== "api.ui.com") return originalFetch(input, init);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		return Response.json({ marker: url.searchParams.get("marker") });
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			const results = await Promise.all(["first", "second"].map((marker) => client.callTool({ name: "code", arguments: {
+				code: `async () => await unifi.request({ method: 'GET', path: '/v1/hosts', query: { marker: '${marker}' } })`,
+			} })));
+			assert.deepEqual(results.map((result) => result.structuredContent.result.marker), ["first", "second"]);
+		});
+		const events = await waitFor(() => {
+			const events = debugServer.getLogs().flatMap((log) => log.message ?? [])
+				.filter((message) => typeof message === "string" && message.startsWith('{"event":"code_'))
+				.map((message) => JSON.parse(message));
+			return events.filter((event) => event.event === "code_execution").length === 2 ? events : undefined;
+		}, "concurrent usage summaries");
+		const calls = events.filter((event) => event.event === "code_connector_call");
+		assert.equal(new Set(calls.map((event) => event.invocationId)).size, 2);
+		assert.equal(new Set(calls.map((event) => event.executionId)).size, 2);
+		for (const call of calls) {
+			const summary = events.find((event) => event.event === "code_execution" && event.invocationId === call.invocationId);
+			assert.equal(summary.executionId, call.executionId);
+			assert.equal(summary.connectorCalls, 1);
+			assert.equal(summary.mcpStatus, "success");
+			assert.equal(call.sequence, 0);
+		}
+		assert.doesNotMatch(JSON.stringify(events), /first|second|marker|query/);
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("omits credentials and personal data from real MCP operational logs", async () => {
+	debugServer.clearLogs();
+	await withMcpClient(undefined, async (client) => {
+		const result = await client.callTool({ name: "code", arguments: { code: `async () => ({
+			personal: 'personal payload fixture', providerKey: '${TEST_SECRETS.UNIFI_API_KEY}',
+			token: 'unknown-token-fixture', client_secret: '${TEST_SECRETS.ACCESS_CLIENT_SECRET}',
+			nextToken: 'next-page-fixture', password: 'password-with-"quote-fixture'
+		})` } });
+		assert.equal(result.structuredContent.result.providerKey, TEST_SECRETS.UNIFI_API_KEY);
+	});
+	const events = await waitFor(() => {
+		const events = debugServer.getLogs().flatMap((log) => log.message ?? [])
+			.filter((message) => typeof message === "string" && message.startsWith('{"event":"code_'))
+			.map((message) => JSON.parse(message));
+		return events.some((event) => event.event === "code_execution") ? events : undefined;
+	}, "metadata-only usage logs");
+	const logs = JSON.stringify(events);
+	assert.equal(events.length, 1);
+	assert.doesNotMatch(logs, /personal payload fixture|next-page-fixture|test-unifi-api-key|test-access-secret|unknown-token-fixture|quote-fixture/);
 });
 
 test("keeps record identity, status and pagination usable in truncated list results", async () => {
@@ -1982,6 +2129,14 @@ test("shares bounded reliability behavior across connector operations", async (t
 			assert.equal(requests, before, "Expired preparation must not dispatch a late write.");
 			mode = "success";
 			assert.deepEqual((await run({ action: "request" })).result, { unchanged: true });
+			const beforeLogFailure = requests;
+			assert.deepEqual((await run({ action: "request", loggingFailure: true })).result, { unchanged: true });
+			assert.equal(requests, beforeLogFailure + 1);
+			mode = "failure";
+			const failedWrite = await run({ action: "request", readOnly: false, loggingFailure: true });
+			assert.equal(requests, beforeLogFailure + 2);
+			assert.equal(failedWrite.details.status, 503);
+			assert.equal(failedWrite.details.outcome, "unknown");
 		} finally { globalThis.fetch = originalFetch; }
 	});
 });

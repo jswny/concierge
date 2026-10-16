@@ -189,18 +189,20 @@ export class ConnectorRequests {
 			// A binding may not support cancellation. Keep its permit until it actually settles.
 			if (controller.signal.aborted && pending) void pending.then(release, release);
 			else release?.();
-			console.log(
-				JSON.stringify({
-					event: "connector_request",
-					connector: operation.connector,
-					operation: operation.operation,
-					durationMs: Date.now() - startedAt,
-					attempts,
-					category: failure?.details.category ?? "success",
-					status: failure?.details.status,
-					outcome: operation.readOnly ? undefined : outcome,
-				}),
-			);
+			try {
+				console.log(
+					JSON.stringify({
+						event: "connector_request",
+						connector: operation.connector,
+						operation: operation.operation,
+						durationMs: Date.now() - startedAt,
+						attempts,
+						category: failure?.details.category ?? "success",
+						status: failure?.details.status,
+						outcome: operation.readOnly ? undefined : outcome,
+					}),
+				);
+			} catch {}
 		}
 	}
 

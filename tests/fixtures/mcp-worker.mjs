@@ -1,8 +1,17 @@
 import { boundMcpRequest } from "../../src/mcp-requests.ts";
 import { observeCodeExecution } from "../../src/code-execution.ts";
+import { UsageLog } from "../../src/usage-logging.ts";
+import { ObservedConnector } from "../../src/observed-connector.ts";
+import { tracing } from "cloudflare:workers";
+
+class FixtureConnector extends ObservedConnector {
+	constructor(ctx, env, usage, handler) { super(ctx, env, usage); this.handler = handler; }
+	name() { return "test"; }
+	tools() { return { request: { execute: this.handler } }; }
+}
 
 export default {
-	async fetch(request, env) {
+	async fetch(request, env, ctx) {
 		const options = await request.json();
 		if (options.action === "ingress") {
 			// Generate rejected uploads inside workerd, not over the harness's HTTP socket.
@@ -27,21 +36,46 @@ export default {
 			const logs = [];
 			let executions = 0;
 			const originalLog = console.log;
+			const originalEnterSpan = tracing.enterSpan;
+			const spans = [];
+			if (options.mockTracing || options.tracingFailure) tracing.enterSpan = (name, callback) => {
+				if (options.tracingFailure === "before") throw new Error("test tracing failure");
+				const record = { name, attributes: {} };
+				spans.push(record);
+				const result = callback({
+					setAttributes(attributes) { Object.assign(record.attributes, attributes); },
+					setStatus(status) { record.status = status; },
+				});
+				if (options.tracingFailure === "after") throw new Error("test tracing failure");
+				return result;
+			};
 			console.log = (message) => {
 				if (options.loggingFailure) throw new Error("test logging failure");
 				logs.push(JSON.parse(message));
 			};
 			try {
+				const usage = new UsageLog();
 				const result = await observeCodeExecution(async () => {
 					executions++;
 					if (options.throw) throw new Error("private exception must not be logged");
+					for (const call of options.output.calls ?? []) {
+						const connector = new FixtureConnector(ctx, env, usage, async () => {
+							if (options.connectorThrow) throw new Error(options.connectorThrow);
+							return call.result;
+						});
+						await connector.executeTool("request", call.args, { executionId: options.output.executionId });
+					}
 					return options.output;
-				});
-				return Response.json({ result, sameReference: result === options.output, logs, executions });
+				}, (output) => {
+					if (options.formatThrow) throw new Error("output formatting failure");
+					return options.response ?? output;
+				}, usage);
+				return Response.json({ result, sameReference: result === (options.response ?? options.output), logs, executions, spans });
 			} catch (error) {
-				return Response.json({ error: error.message, logs, executions });
+				return Response.json({ error: error.message, logs, executions, spans });
 			} finally {
 				console.log = originalLog;
+				tracing.enterSpan = originalEnterSpan;
 			}
 		}
 		let cancelled = false;

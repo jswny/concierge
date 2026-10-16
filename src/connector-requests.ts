@@ -8,6 +8,7 @@ type ErrorCategory =
 	| "network"
 	| "timeout"
 	| "invalid_response"
+	| "unsupported_response"
 	| "response_too_large"
 	| "busy";
 type Outcome = "not_started" | "rejected" | "unknown" | "succeeded";
@@ -258,6 +259,13 @@ export class ConnectorRequests {
 		maxBytes = this.limits.maxResponseBytes,
 	): Promise<unknown> {
 		if (!response.body) return null;
+		const contentType = response.headers.get("Content-Type");
+		const mediaType = contentType?.split(";", 1)[0].trim().toLowerCase();
+		const validMediaType = mediaType && mediaType.length <= 127 &&
+			/^[-!#$%&'*+.^_`|~0-9a-z]+\/[-!#$%&'*+.^_`|~0-9a-z]+$/.test(mediaType);
+		const isJson = validMediaType && mediaType.startsWith("application/") &&
+			(mediaType === "application/json" || mediaType.endsWith("+json"));
+		const unsupported = format === "json" && contentType !== null && !isJson;
 		const reader = response.body.getReader();
 		const chunks: Uint8Array[] = [];
 		let size = 0;
@@ -265,6 +273,11 @@ export class ConnectorRequests {
 			for (;;) {
 				const { value, done } = await abortable(reader.read(), signal);
 				if (done) break;
+				// Wait for actual bytes so empty successes still return null, regardless of headers.
+				if (value.byteLength && unsupported) throw new ConnectorError({
+					category: "unsupported_response",
+					message: `Upstream returned an unsupported response format${validMediaType ? ` (${mediaType})` : ""}; this connector accepts JSON only.`,
+				});
 				size += value.byteLength;
 				if (size > maxBytes)
 					throw new ConnectorError({

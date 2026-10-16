@@ -47,6 +47,7 @@ export default {
 						return { Authorization: "Bearer fixture-secret" };
 					},
 					classifyError: (_status, payload) => ({ message: payload?.message, code: payload?.code }),
+					format: options.format,
 				});
 				return Response.json({ result });
 			}
@@ -72,13 +73,15 @@ export default {
 									new ReadableStream({
 										start(controller) {
 											controller.enqueue(new TextEncoder().encode(options.body ?? "{}"));
+											if (options.closeBody) controller.close();
 										},
 										cancel() {
 											cancelled = true;
 										},
 									}),
+									{ headers: options.headers },
 								);
-								return await runtime.readPayload(response, attempt.signal);
+								return await runtime.readPayload(response, attempt.signal, options.format);
 							}
 							await new Promise((resolve) => setTimeout(resolve, options.delayMs ?? 5));
 							if (options.failureRaw) throw new Error("fixture-secret must not escape");

@@ -1269,6 +1269,9 @@ test("UniFi rejects redirects and non-JSON media without exposing response bodie
 				} });
 				assert.equal(result.isError, true);
 				assert.equal(calls, 1);
+				assert.match(result.content[0].text, currentMode === "media"
+					? /unsupported response format \(image\/jpeg\).*JSON only.*unsupported_response/
+					: /HTTP 302/);
 				assert.doesNotMatch(JSON.stringify(result), /private-image-data|test-unifi-api-key/);
 			}
 		});
@@ -1753,6 +1756,32 @@ test("shares bounded reliability behavior across connector operations", async (t
 		assert.equal(large.cancelled, true);
 		assert.equal(large.results[0].details.category, "response_too_large");
 	});
+	await t.test("rejects unsupported formats without buffering media or replaying successful writes", async () => {
+		for (const contentType of ["IMAGE/JPEG; filename=private-header", "image/png", "text/html", "application/octet-stream", "not a media type private-header"]) {
+			const result = await run({ action: "body", readOnly: false, body: "private-response-body", headers: { "Content-Type": contentType } });
+			assert.equal(result.cancelled, true);
+			assert.equal(result.attempts, 1);
+			assert.equal(result.results[0].details.category, "unsupported_response");
+			assert.equal(result.results[0].details.outcome, "succeeded");
+			assert.match(result.results[0].error, /JSON only.*retryable=false.*safe_to_replay=false.*outcome=succeeded/);
+			assert.doesNotMatch(JSON.stringify(result), /private-response-body|private-header|invalid JSON/);
+			if (contentType.startsWith("IMAGE")) assert.match(result.results[0].error, /\(image\/jpeg\)/);
+		}
+	});
+	await t.test("preserves JSON media types, missing headers, empty successes, and malformed JSON errors", async () => {
+		for (const contentType of [undefined, "application/json; charset=utf-8", "application/problem+json", "Application/Vnd.Example+Json"]) {
+			const result = await run({ action: "body", closeBody: true, body: '{"unchanged":true}', headers: contentType ? { "Content-Type": contentType } : {} });
+			assert.deepEqual(result.results[0].result, { unchanged: true });
+		}
+		const empty = await run({ action: "body", closeBody: true, body: "", headers: { "Content-Type": "text/plain" } });
+		assert.equal(empty.results[0].result, null);
+		const malformed = await run({ action: "body", closeBody: true, body: "private-response-body", headers: { "Content-Type": "application/json" } });
+		assert.equal(malformed.results[0].details.category, "invalid_response");
+		assert.match(malformed.results[0].error, /invalid JSON/);
+		assert.doesNotMatch(malformed.results[0].error, /private-response-body/);
+		const text = await run({ action: "body", closeBody: true, body: "plain text", format: "json-or-text", headers: { "Content-Type": "text/plain" } });
+		assert.equal(text.results[0].result, "plain text");
+	});
 	await t.test("HTTP requests include preparation in deadlines and redact credentials", async () => {
 		const originalFetch = globalThis.fetch;
 		let requests = 0;
@@ -1762,7 +1791,9 @@ test("shares bounded reliability behavior across connector operations", async (t
 			if (request.url !== "https://reliability.example/api") return originalFetch(input, init);
 			requests++;
 			if (mode === "redirect") return new Response(null, { status: 302, headers: { Location: "https://evil.example/credentials" } });
-			if (mode === "invalid") return new Response("not-json");
+			if (mode === "invalid") return new Response("not-json", { headers: { "Content-Type": "application/json" } });
+			if (mode === "html-failure") return new Response("private-error-body fixture-secret", { status: 503, headers: { "Content-Type": "text/html" } });
+			if (mode === "media") return new Response("private-image-body", { headers: { "Content-Type": "image/png; filename=fixture-secret" } });
 			if (mode === "authentication") return Response.json({ message: "fixture-secret private-token-body" }, { status: 401 });
 			if (mode === "success") return Response.json({ unchanged: true });
 			return Response.json({ message: "Rejected fixture-secret", code: "fixture-secret" }, { status: 503, headers: { "X-Request-Id": "request-123" } });
@@ -1781,6 +1812,20 @@ test("shares bounded reliability behavior across connector operations", async (t
 			const malformedWrite = await run({ action: "request", readOnly: false });
 			assert.equal(malformedWrite.details.category, "invalid_response");
 			assert.equal(malformedWrite.details.outcome, "succeeded");
+			mode = "media";
+			const beforeMedia = requests;
+			const mediaWrite = await run({ action: "request", readOnly: false });
+			assert.equal(requests, beforeMedia + 1);
+			assert.equal(mediaWrite.details.category, "unsupported_response");
+			assert.equal(mediaWrite.details.outcome, "succeeded");
+			assert.doesNotMatch(mediaWrite.error, /private-image-body|fixture-secret/);
+			mode = "html-failure";
+			const beforeHtml = requests;
+			const htmlFailure = await run({ action: "request" });
+			assert.equal(requests, beforeHtml + 3);
+			assert.equal(htmlFailure.details.category, "http");
+			assert.equal(htmlFailure.details.status, 503);
+			assert.doesNotMatch(htmlFailure.error, /private-error-body|fixture-secret|unsupported_response|invalid JSON/);
 			mode = "authentication";
 			const auth = await run({ action: "request" });
 			assert.equal(auth.details.category, "authentication");
@@ -1817,7 +1862,7 @@ test("applies shared reliability to real MCP connector calls without replaying C
 		if (host !== "gmail.googleapis.com") return originalFetch(input, init);
 		googleCalls++;
 		assert.equal(request.headers.get("Authorization"), "Bearer test-google-workspace-token");
-		if (mode === "google-invalid") return new Response("invalid-json");
+		if (mode === "google-invalid") return new Response("invalid-json", { headers: { "Content-Type": "application/json" } });
 		if (mode === "google-auth-invalidate") return Response.json({ error: { message: "rejected token" } }, { status: 401 });
 		if (mode === "google-permission") return Response.json({ error: { message: "private forbidden body", errors: [{ reason: "domainPolicy" }] } }, { status: 403 });
 		if (mode === "google-rate-write") return Response.json({ error: { message: "rate limit", errors: [{ reason: "userRateLimitExceeded" }] } }, { status: 403 });

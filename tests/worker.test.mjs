@@ -1330,7 +1330,8 @@ test("delivers returned Protect JPEG snapshots as native MCP images with compact
 				assert.equal(ignored.content.length, 1);
 			});
 			await t.test("does not truncate image bytes when truncating large JSON output", async () => {
-				body = Buffer.concat([JPEG, Buffer.alloc(150_000)]);
+				body = Buffer.concat([JPEG, Buffer.alloc(900_000)]);
+				assert.ok(body.toString("base64").length > 1_000_000, "Exercise Code Mode's durable value limit.");
 				const result = await invoke(`async () => ({ snapshot: await ${snapshot}, note: 'x'.repeat(200000) })`);
 				assert.equal(result.isError, undefined);
 				assert.match(result.content[0].text, /--- TRUNCATED ---/);
@@ -1339,11 +1340,22 @@ test("delivers returned Protect JPEG snapshots as native MCP images with compact
 				assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent.result);
 				body = JPEG;
 			});
+			await t.test("keeps image bytes out of Code Mode and rejects references from another invocation", async () => {
+				const reference = await invoke(`async () => { const image = await ${snapshot}; return { keys: Object.keys(image).sort(), imageId: image.imageId, byteLength: image.byteLength }; }`);
+				assert.deepEqual(reference.structuredContent.result.keys, ["byteLength", "imageId", "mimeType", "type"]);
+				assert.equal(reference.content.length, 1);
+				const saved = reference.structuredContent.result;
+				const stale = await invoke(`async () => ({ type: 'image', mimeType: 'image/jpeg', imageId: '${saved.imageId}', byteLength: ${saved.byteLength} })`);
+				assert.equal(stale.isError, true);
+				assert.match(stale.content[0].text, /unchanged image references from this invocation/);
+				assert.equal(stale.content.length, 1);
+			});
 			await t.test("bounds image count and aggregate size without delivering partial or truncated images", async () => {
-				for (const code of [
-					`async () => { const image = await ${snapshot}; return Array(5).fill(image); }`,
-					`async () => { const image = await ${snapshot}; const data = new Uint8Array(2097153); data.set(image.data); return [{ ...image, data }, { ...image, data }]; }`,
+				for (const [bytes, code] of [
+					[JPEG, `async () => { const image = await ${snapshot}; return Array(5).fill(image); }`],
+					[Buffer.concat([JPEG, Buffer.alloc(2097153 - JPEG.length)]), `async () => { const image = await ${snapshot}; return [image, image]; }`],
 				]) {
+					body = bytes;
 					const before = calls;
 					const result = await invoke(code);
 					assert.equal(result.isError, true);
@@ -1352,6 +1364,22 @@ test("delivers returned Protect JPEG snapshots as native MCP images with compact
 					assert.equal(result.content.length, 1);
 					assert.equal(result.structuredContent, undefined);
 				}
+				body = JPEG;
+			});
+			await t.test("bounds retained bytes and image count even when fetched images are not returned", async () => {
+				for (const [bytes, count, dispatched] of [
+					[JPEG, 5, 5],
+					[Buffer.concat([JPEG, Buffer.alloc(2097153 - JPEG.length)]), 2, 2],
+				]) {
+					body = bytes;
+					const before = calls;
+					const result = await invoke(`async () => { for (let i=0; i<${count}; i++) await ${snapshot}; return true; }`);
+					assert.equal(result.isError, true);
+					assert.equal(calls, before + dispatched);
+					assert.match(result.content[0].text, /Retrieve at most 4 images totaling 4 MiB.*do not replay writes/);
+					assert.equal(result.content.length, 1);
+				}
+				body = JPEG;
 			});
 			await t.test("rejects invalid JPEG, unsupported images and video, and preserves non-JSON HTTP failures", async () => {
 				for (const [type, bytes, httpStatus, expected] of [

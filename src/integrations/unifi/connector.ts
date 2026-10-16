@@ -1,6 +1,7 @@
 import { CodemodeConnector, type ConnectorTools } from "@cloudflare/codemode";
 import { ConnectorRequests, createApiUrl, isRecord, type ApiFailure } from "../../connector-requests";
 import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../connector-inputs";
+import { ConnectorImages, isConnectorImage } from "../../connector-images";
 
 const API_ORIGIN = "https://api.ui.com";
 const PROXY_PATH = /^\/v1\/connector\/consoles\/[^/]+\/proxy\/(network|protect)\/integration\/v1\//;
@@ -12,7 +13,7 @@ const requestSchema = apiRequestSchema({
 const requestInputSchema = toToolInputSchema(requestSchema);
 
 export class UnifiConnector extends CodemodeConnector<Env> {
-	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests) {
+	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests, private readonly images: ConnectorImages) {
 		super(ctx, env);
 	}
 
@@ -28,16 +29,16 @@ export class UnifiConnector extends CodemodeConnector<Env> {
 			"Use /v1/connector/consoles/{consoleId}/proxy/network/integration/v1/ or /v1/connector/consoles/{consoleId}/proxy/protect/integration/v1/ for application calls. Encode each returned ID as a URL path segment. For Network, list local sites first at the network prefix plus sites, then use that local siteId for clients/devices/networks; do not substitute a Site Manager site ID.",
 			"Cloud Connector requires compatible console firmware (at least 5.0.3); personal keys can proxy only to consoles owned by the key's account. Credentials and API origin are server-owned.",
 			"Supports reads and writes permitted by the key. Configuration changes, device actions, and deletes can interrupt connectivity or change security settings. Failed calls do not undo earlier actions; never blindly replay a write with an unknown outcome.",
-			"Returns native JSON unchanged, including pagination and per-item outcomes, or null for empty responses. Protect GET cameras/{id}/snapshot returns a JPEG image value with Uint8Array data; return that value unchanged (directly or nested in an object/array) to deliver an MCP image. Do not stringify or base64-encode it. Only GET calls are automatically replay-safe. No video, other image formats, NAS/Drive, legacy internal APIs, local-network access, file transfer, or WebSocket event subscriptions.",
+			"Returns native JSON unchanged, including pagination and per-item outcomes, or null for empty responses. Protect GET cameras/{id}/snapshot returns an opaque, invocation-local JPEG image reference; return that value unchanged (directly or nested in an object/array) in the same invocation to deliver an MCP image. Image bytes are not accessible in Code Mode or retained in durable history. Do not stringify the reference or reuse it in another invocation. Retrieve at most four images totaling 4 MiB per invocation. Only GET calls are automatically replay-safe. No video, other image formats, NAS/Drive, legacy internal APIs, local-network access, file transfer, or WebSocket event subscriptions.",
 		].join(" ");
 	}
 
 	protected tools(): ConnectorTools {
 		return {
 			request: {
-				description: "Call official UniFi APIs for console discovery and management of networking/Wi-Fi, connected clients, APs, switches, gateways, networks, camera/NVR status, Protect settings and controls, and JPEG camera snapshots. Use native /v1/ Site Manager paths (start with GET /v1/hosts), or /v1/connector/consoles/{consoleId}/proxy/{network|protect}/integration/v1/... for application calls. Encode IDs as path segments. Network siteId values come from the console's Network sites, not Site Manager. Consult developer.ui.com for supported endpoints and installed versions. Authentication is server-owned; permitted writes/deletes are supported and can disrupt network/security settings. Returns native JSON and pagination unchanged, null for empty responses, or an image value for Protect cameras/{id}/snapshot (image/jpeg). Return image values unchanged, directly or nested in an object/array, to deliver MCP images; do not stringify or base64-encode them. No video, other image formats, NAS/Drive, legacy API, or event streaming.",
+				description: "Call official UniFi APIs for console discovery and management of networking/Wi-Fi, connected clients, APs, switches, gateways, networks, camera/NVR status, Protect settings and controls, and JPEG camera snapshots. Use native /v1/ Site Manager paths (start with GET /v1/hosts), or /v1/connector/consoles/{consoleId}/proxy/{network|protect}/integration/v1/... for application calls. Encode IDs as path segments. Network siteId values come from the console's Network sites, not Site Manager. Consult developer.ui.com for supported endpoints and installed versions. Authentication is server-owned; permitted writes/deletes are supported and can disrupt network/security settings. Returns native JSON and pagination unchanged, null for empty responses, or an opaque image reference for Protect cameras/{id}/snapshot (image/jpeg). Return image references unchanged, directly or nested in an object/array, in the same invocation to deliver MCP images. No raw image bytes in Code Mode; do not stringify references or reuse them across invocations. Retrieve at most four images totaling 4 MiB per invocation. No video, other image formats, NAS/Drive, legacy API, or event streaming.",
 				inputSchema: requestInputSchema,
-				execute: async (args) => {
+				execute: async (args, execution) => {
 					const options = parseApiRequest(requestSchema, args);
 					const url = createApiUrl(API_ORIGIN, "/v1/", options.path, options.query);
 					// The cloud proxy must not become an escape hatch into console-internal APIs.
@@ -48,7 +49,7 @@ export class UnifiConnector extends CodemodeConnector<Env> {
 						throw new Error("UniFi cloud proxy paths must target the Network or Protect integration/v1 API.");
 					}
 					if (!this.env.UNIFI_API_KEY) throw new Error("UNIFI_API_KEY is not configured.");
-					return this.requests.request({
+					const result = await this.requests.request({
 						connector: "UniFi",
 						operation: "request",
 						readOnly: options.method === "GET",
@@ -59,6 +60,9 @@ export class UnifiConnector extends CodemodeConnector<Env> {
 						body: options.body === undefined ? undefined : JSON.stringify(options.body),
 						classifyError: classifyUnifiError,
 					});
+					if (!isConnectorImage(result)) return result;
+					if (!execution) throw new Error("Image retrieval requires a Code Mode invocation.");
+					return this.images.capture(execution.executionId, result);
 				},
 			},
 		};

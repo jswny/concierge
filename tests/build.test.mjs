@@ -51,6 +51,11 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 	const client = new Client({ name: "concierge-build-test", version: "1" }, {
 		versionNegotiation: { mode: { pin: "2026-07-28" } },
 	});
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = async (input, init) => {
+		if (new URL(new Request(input, init).url).hostname !== "api.ui.com") return originalFetch(input, init);
+		return new Response(Buffer.from(JPEG_BASE64, "base64"), { headers: { "Content-Type": "image/jpeg" } });
+	};
 	try {
 		const listener = await harness.listen();
 		const worker = harness.getWorker("concierge");
@@ -94,7 +99,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		assert.equal(page.structuredContent.result.finalUrl, "https://example.com/final");
 		assert.match(page.structuredContent.result.markdown, /Wait: networkidle2/);
 		const image = await client.callTool({ name: "code", arguments: {
-			code: `async () => ({ snapshot: { type: 'image', mimeType: 'image/jpeg', data: Uint8Array.from(atob('${JPEG_BASE64}'), c => c.charCodeAt(0)) } })`,
+			code: "async () => ({ snapshot: await unifi.request({ method: 'GET', path: '/v1/connector/consoles/id/proxy/protect/integration/v1/cameras/camera-id/snapshot' }) })",
 		} });
 		assert.equal(image.isError, undefined);
 		assert.deepEqual(image.content[1], { type: "image", mimeType: "image/jpeg", data: JPEG_BASE64 });
@@ -103,6 +108,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		});
 		assert.deepEqual(JSON.parse(image.content[0].text), image.structuredContent.result);
 	} finally {
+		globalThis.fetch = originalFetch;
 		await client.close();
 		await harness.close();
 	}

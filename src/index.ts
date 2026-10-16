@@ -19,7 +19,7 @@ import { UnifiConnector } from "./integrations/unifi/connector";
 import { ConnectorRequests } from "./connector-requests";
 import { boundMcpRequest, MAX_CODE_CHARS } from "./mcp-requests";
 import { observeCodeExecution } from "./code-execution";
-import { hasJpegSignature, isConnectorImage } from "./connector-images";
+import { ConnectorImages, isImageReference } from "./connector-images";
 
 export { CodemodeRuntime } from "@cloudflare/codemode";
 
@@ -51,6 +51,7 @@ function createConciergeServer(
 	googleAuth: GoogleWorkspaceAuth,
 	requests: ConnectorRequests,
 ) {
+	const images = new ConnectorImages();
 	const server = new McpServer({
 		name: "Concierge MCP",
 		version: "1.0.0",
@@ -62,7 +63,7 @@ function createConciergeServer(
 			new CloudflareConnector(ctx, env, requests),
 			new GoogleConnector(ctx, env, googleAuth, requests),
 			new MapsConnector(ctx, env, requests),
-			new UnifiConnector(ctx, env, requests),
+			new UnifiConnector(ctx, env, requests, images),
 		],
 		ctx,
 		executor: new DynamicWorkerExecutor({ loader: env.LOADER }),
@@ -98,7 +99,14 @@ function createConciergeServer(
 				openWorldHint: true,
 			},
 		},
-		async ({ code }) => formatCodeToolOutput(await observeCodeExecution(() => runtime.execute({ code }))),
+		async ({ code }) => {
+			const output = await observeCodeExecution(() => runtime.execute({ code }));
+			try {
+				return formatCodeToolOutput(output, images);
+			} finally {
+				images.clear(output.executionId);
+			}
+		},
 	);
 
 	return server;
@@ -137,7 +145,7 @@ function createConciergeCodeToolDescription(defaultDescription: string) {
 		[
 			"The Code Mode result is the single value returned by the async function. Return any value the model should receive for later reasoning; console logs and intermediate values are not returned.",
 			"If multiple values are needed, return one object that contains them, e.g. `return { first, second };`.",
-			"Return connector image values unchanged, directly or nested in an object/array, e.g. `return { camera, snapshot };`. Only returned images are delivered as MCP image content; their positions in the JSON result contain type, mimeType, byteLength, and contentIndex (a zero-based index into MCP content). Do not stringify, base64-encode, or print image data. At most 4 images totaling 4 MiB may be returned per invocation; images are never text-truncated.",
+			"Return connector image values unchanged in the same invocation, directly or nested in an object/array, e.g. `return { camera, snapshot };`. They are opaque, invocation-local references, not image bytes; do not stringify or reuse them across invocations. Only returned images are delivered as MCP image content; their positions in the JSON result contain type, mimeType, byteLength, and contentIndex (a zero-based index into MCP content). At most 4 images totaling 4 MiB may be retrieved or returned per invocation; images are never text-truncated.",
 			"Large return values may be structurally truncated with `--- TRUNCATED ---` markers. Filter, project, or use native API pagination inside the function before returning; keep needed identifiers, status fields, and pagination metadata in the smaller result.",
 			"Do not treat truncated output as complete or reuse a truncated identifier or cursor. Retrieve a smaller result instead; output truncation does not undo any earlier writes.",
 		].join("\n"),
@@ -171,10 +179,10 @@ function appendMarkdownSection(markdown: string, heading: string, body: string) 
 	return `${markdown}\n\n## ${heading}\n\n${body}`;
 }
 
-function formatCodeToolOutput(output: ProxyToolOutput): CodeToolResult {
+function formatCodeToolOutput(output: ProxyToolOutput, imageStore: ConnectorImages): CodeToolResult {
 	if (output.status === "completed") {
 		try {
-			const { result, images } = prepareImageOutput(output.result);
+			const { result, images } = prepareImageOutput(output.result, output.executionId, imageStore);
 			const bounded = truncateResult(result);
 			return {
 				content: [{ text: stringifyToolResult(bounded), type: "text" }, ...images],
@@ -182,7 +190,7 @@ function formatCodeToolOutput(output: ProxyToolOutput): CodeToolResult {
 			};
 		} catch {
 			return {
-				content: [{ type: "text", text: "Cannot deliver this result: return valid JPEG image values, at most 4 images totaling 4 MiB, and JSON-serializable data. Earlier connector calls may have succeeded; do not replay writes." }],
+				content: [{ type: "text", text: "Cannot deliver this result: return unchanged image references from this invocation, at most 4 images totaling 4 MiB, and JSON-serializable data. Earlier connector calls may have succeeded; do not replay writes." }],
 				isError: true,
 			};
 		}
@@ -206,18 +214,19 @@ function formatCodeToolOutput(output: ProxyToolOutput): CodeToolResult {
 	};
 }
 
-function prepareImageOutput(value: unknown) {
+function prepareImageOutput(value: unknown, executionId: string, imageStore: ConnectorImages) {
 	const images: ImageContent[] = [];
 	let totalBytes = 0;
 	// Extract before upstream text truncation so binary data is neither clipped nor duplicated in JSON.
 	const json = JSON.stringify(value, (_key, nested: unknown) => {
-		if (!isConnectorImage(nested)) return nested;
-		totalBytes += nested.data.byteLength;
-		if (images.length >= 4 || totalBytes > 4 * 1024 * 1024 || !hasJpegSignature(nested.data)) {
+		if (!isImageReference(nested)) return nested;
+		const image = imageStore.resolve(executionId, nested);
+		totalBytes += image.data.byteLength;
+		if (images.length >= 4 || totalBytes > 4 * 1024 * 1024) {
 			throw new Error("Image output limit or signature check failed.");
 		}
-		images.push({ type: "image", mimeType: nested.mimeType, data: Buffer.from(nested.data).toString("base64") });
-		return { type: "image", mimeType: nested.mimeType, byteLength: nested.data.byteLength, contentIndex: images.length };
+		images.push({ type: "image", mimeType: image.mimeType, data: Buffer.from(image.data).toString("base64") });
+		return { type: "image", mimeType: image.mimeType, byteLength: image.data.byteLength, contentIndex: images.length };
 	});
 	return { result: json === undefined ? undefined : JSON.parse(json) as unknown, images };
 }

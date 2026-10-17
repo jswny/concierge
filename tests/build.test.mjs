@@ -41,7 +41,12 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 				configPath: "./dist/concierge/wrangler.json",
 				bindingOverrides: { BROWSER: "browser-mock" },
 				vars: { CONCIERGE_DEBUG: "true" },
-				secrets: Object.fromEntries(output.secrets.required.map((name) => [name, "unused-build-test-secret"])),
+				secrets: {
+					...Object.fromEntries(output.secrets.required.map((name) => [name, "unused-build-test-secret"])),
+					TWILIO_ACCOUNT_SID: `AC${"a".repeat(32)}`,
+					TWILIO_API_KEY_SID: `SK${"b".repeat(32)}`,
+					TWILIO_API_KEY_SECRET: "build-twilio-secret",
+				},
 			},
 			{
 				config: { name: "browser-mock", main: "./tests/fixtures/browser-worker.mjs", compatibility_date: "2026-07-15" },
@@ -53,7 +58,14 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 	});
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = async (input, init) => {
-		if (new URL(new Request(input, init).url).hostname !== "api.ui.com") return originalFetch(input, init);
+		const request = new Request(input, init);
+		const url = new URL(request.url);
+		if (url.hostname === "api.twilio.com") {
+			assert.equal(request.headers.get("Authorization"), `Basic ${Buffer.from(`SK${"b".repeat(32)}:build-twilio-secret`).toString("base64")}`);
+			assert.equal(url.pathname, `/2010-04-01/Accounts/AC${"a".repeat(32)}/Messages.json`);
+			return Response.json({ messages: [{ sid: "SMbuild", status: "received" }], next_page_uri: null });
+		}
+		if (url.hostname !== "api.ui.com") return originalFetch(input, init);
 		return new Response(Buffer.from(JPEG_BASE64, "base64"), { headers: { "Content-Type": "image/jpeg" } });
 	};
 	try {
@@ -83,6 +95,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		assert.match(tools[0].description, /- `maps`.*Routes API/);
 		assert.match(tools[0].description, /- `google`.*Gmail/);
 		assert.match(tools[0].description, /- `unifi`.*unifi\.request/);
+		assert.match(tools[0].description, /- `twilio`.*twilio\.request/);
 		assert.doesNotMatch(tools[0].description, /notion/i);
 		assert.match(tools[0].description, /search for `maps directions`/);
 		const result = await client.callTool({ name: "code", arguments: {
@@ -90,7 +103,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		} });
 		assert.equal(result.isError, undefined);
 		assert.equal(result.structuredContent.result.sum, 4);
-		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["cloudflare.read_webpage_as_markdown", "google.request", "maps.request", "unifi.request"]);
+		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["cloudflare.read_webpage_as_markdown", "google.request", "maps.request", "twilio.request", "unifi.request"]);
 		const page = await client.callTool({ name: "code", arguments: {
 			code: "async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/test' })",
 		} });
@@ -107,6 +120,11 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 			type: "image", mimeType: "image/jpeg", byteLength: Buffer.from(JPEG_BASE64, "base64").length, contentIndex: 1,
 		});
 		assert.deepEqual(JSON.parse(image.content[0].text), image.structuredContent.result);
+		const messages = await client.callTool({ name: "code", arguments: {
+			code: "async () => await twilio.request({ method: 'GET', path: '/2010-04-01/Accounts/{AccountSid}/Messages.json', query: { PageSize: 1 } })",
+		} });
+		assert.equal(messages.isError, undefined, JSON.stringify(messages));
+		assert.deepEqual(messages.structuredContent.result, { messages: [{ sid: "SMbuild", status: "received" }], next_page_uri: null });
 	} finally {
 		globalThis.fetch = originalFetch;
 		await client.close();

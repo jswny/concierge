@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { ConnectorTool } from "@cloudflare/codemode";
 
-const scalar = z.union([z.boolean(), z.number(), z.string()]);
+export const apiScalarSchema = z.union([z.boolean(), z.number(), z.string()]);
 
 export function toToolInputSchema(schema: z.ZodType) {
 	// Zod's return type spans multiple dialects; Code Mode accepts Draft 7 specifically.
@@ -17,7 +17,7 @@ export function apiRequestSchema(contract: {
 		method: z.enum(contract.methods).describe("API HTTP method."),
 		path: z.string().startsWith(contract.pathPrefix)
 			.describe(`Relative API path beginning with ${contract.pathPrefix}. Put query parameters in query.`),
-		query: z.record(z.string(), contract.queryArrays ? z.union([scalar, z.array(scalar)]) : scalar)
+		query: z.record(z.string(), contract.queryArrays ? z.union([apiScalarSchema, z.array(apiScalarSchema)]) : apiScalarSchema)
 			.optional().describe(contract.queryArrays
 				? "Optional query parameters. Arrays produce repeated parameters."
 				: "Optional scalar query parameters."),

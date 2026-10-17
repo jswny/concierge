@@ -36,6 +36,9 @@ const TEST_SECRETS = {
 	GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify(GOOGLE_CREDENTIALS),
 	GOOGLE_MAPS_API_KEY: "test-maps-api-key",
 	UNIFI_API_KEY: "test-unifi-api-key",
+	TWILIO_ACCOUNT_SID: `AC${"a".repeat(32)}`,
+	TWILIO_API_KEY_SID: `SK${"b".repeat(32)}`,
+	TWILIO_API_KEY_SECRET: "test-twilio-api-secret",
 };
 
 const debugServer = createConciergeHarness(true);
@@ -706,7 +709,7 @@ test("serves the code tool over the modern MCP protocol", async () => {
 			assert.match(tool.description ?? "", /codemode\.search.*connector method names/s);
 			const connectorSection = (tool.description ?? "").split("## Available connectors\n")[1]?.split("\n## ")[0];
 			assert.ok(connectorSection);
-			for (const name of ["cloudflare", "google", "maps", "unifi"]) {
+			for (const name of ["cloudflare", "google", "maps", "unifi", "twilio"]) {
 				assert.match(connectorSection, new RegExp("- `" + name + "`"));
 			}
 			assert.match(connectorSection, /Routes API/);
@@ -1259,6 +1262,196 @@ test("rejects invalid Google request arguments before outbound calls", async () 
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
+});
+
+test("discovers Twilio and preserves native messages, form bodies, account paths and pagination", async () => {
+	const originalFetch = globalThis.fetch;
+	const prefix = `/2010-04-01/Accounts/${TEST_SECRETS.TWILIO_ACCOUNT_SID}`;
+	const authorization = `Basic ${Buffer.from(`${TEST_SECRETS.TWILIO_API_KEY_SID}:${TEST_SECRETS.TWILIO_API_KEY_SECRET}`).toString("base64")}`;
+	const page = { messages: [{ sid: "SMfixture", body: "Native message", status: "received", price: "-0.01" }],
+		next_page_uri: `${prefix}/Messages.json?PageToken=native%2Btoken&PageSize=1`, page: 0, page_size: 1 };
+	const cases = [
+		{ options: { method: "GET", path: "/2010-04-01/Accounts/{AccountSid}/Messages.json", query: { PageSize: 1, "DateSent>=": "2026-10-01", To: "+15555550123" } }, result: page },
+		{ options: { method: "GET", path: `${prefix}/Messages.json`, query: { PageToken: "native+token", PageSize: 1 } }, result: { ...page, next_page_uri: null, page: 1 } },
+		{ options: { method: "POST", path: "/2010-04-01/Accounts/{AccountSid}/Messages.json", body: { To: "+15555550123", From: "+15555550456", Body: "A + B & C", MediaUrl: ["https://example.com/one.jpg", "https://example.com/two.jpg"], ProvideFeedback: true, MaxPrice: 0.05 } }, result: { sid: "SMsent", status: "queued", error_code: null } },
+		{ options: { method: "POST", path: `${prefix}/Calls.json`, body: { To: "+15555550123", From: "+15555550456", Twiml: '<Response><Say>Hello</Say></Response>' } }, result: { sid: "CAfixture", status: "queued" } },
+		{ options: { method: "GET", path: `${prefix}/IncomingPhoneNumbers.json` }, result: { incoming_phone_numbers: [] } },
+		{ options: { method: "GET", path: `${prefix}/Usage/Records/Today.json` }, result: { usage_records: [{ category: "sms", count: "2" }] } },
+		{ options: { method: "DELETE", path: `${prefix}/Messages/SMfixture.json` }, result: null },
+	];
+	let current;
+	let calls = 0;
+	let dispatchFailure;
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		const url = new URL(request.url);
+		if (url.hostname !== "api.twilio.com") return originalFetch(input, init);
+		calls++;
+		try {
+			assert.equal(request.headers.get("Authorization"), authorization);
+			assert.equal(request.headers.get("Accept"), "application/json");
+			assert.equal(request.headers.has("X-API-Key"), false);
+			assert.equal(request.headers.has("X-Goog-Api-Key"), false);
+			assert.equal(request.method, current.options.method);
+			assert.equal(url.pathname, current.options.path.replace("{AccountSid}", TEST_SECRETS.TWILIO_ACCOUNT_SID));
+			assert.deepEqual(Object.fromEntries(url.searchParams), Object.fromEntries(Object.entries(current.options.query ?? {}).map(([k, v]) => [k, String(v)])));
+			if (current.options.body !== undefined) {
+				assert.equal(request.headers.get("Content-Type"), "application/x-www-form-urlencoded");
+				const body = new URLSearchParams(await request.text());
+				for (const [key, value] of Object.entries(current.options.body))
+					assert.deepEqual(body.getAll(key), (Array.isArray(value) ? value : [value]).map(String));
+			} else assert.equal(await request.text(), "");
+			return current.result === null ? new Response(null, { status: 204 }) : Response.json(current.result);
+		} catch (error) { dispatchFailure = error; throw error; }
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			const tools = await client.listTools();
+			assert.match(tools.tools[0].description, /twilio\.request/);
+			for (const query of ["twilio", "send SMS", "message delivery status", "voice calls", "phone numbers"]) {
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await codemode.search(${JSON.stringify(query)})` } });
+				assert.ok(result.structuredContent.result.results.some((match) => match.path === "twilio.request"), query);
+			}
+			const docs = await client.callTool({ name: "code", arguments: { code: "async () => await codemode.describe('twilio.request')" } });
+			assert.match(JSON.stringify(docs), /form parameters|form body fields/);
+			assert.doesNotMatch(JSON.stringify(docs), /test-twilio-api-secret/);
+			for (current of cases) {
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await twilio.request(${JSON.stringify(current.options)})` } });
+				if (dispatchFailure) throw dispatchFailure;
+				assert.equal(result.isError, undefined, JSON.stringify(result));
+				assert.deepEqual(result.structuredContent.result, current.result);
+				assert.deepEqual(JSON.parse(result.content[0].text), current.result);
+				assert.ok(!JSON.stringify(result).includes(TEST_SECRETS.TWILIO_API_KEY_SID));
+				assert.ok(!JSON.stringify(result).includes(TEST_SECRETS.TWILIO_API_KEY_SECRET));
+			}
+		});
+		assert.equal(calls, cases.length);
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("Twilio rejects credential overrides, account escapes, unsupported paths and invalid form parameters before dispatch", async () => {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		if (!new URL(new Request(input, init).url).hostname.endsWith("twilio.com")) return originalFetch(input, init);
+		calls++;
+		return Response.json({ unexpected: true });
+	};
+	const base = { method: "GET", path: "/2010-04-01/Accounts/{AccountSid}/Messages.json" };
+	try {
+		await withMcpClient(undefined, async (client) => {
+			for (const override of [
+				{ method: "OPTIONS" }, { accountSid: "other" }, { headers: { Authorization: "Basic override" } }, { url: "https://evil.example/" },
+				{ path: "https://api.twilio.com/2010-04-01/Accounts/other/Messages.json" },
+				{ path: "/v1/Services" }, { path: "/2010-04-01/Accounts.json" },
+				{ path: `/2010-04-01/Accounts/AC${"c".repeat(32)}/Messages.json` },
+				{ path: "/2010-04-01/Accounts/{AccountSid}/../../Accounts.json" },
+				{ path: "/2010-04-01/Accounts/{AccountSid}/%2e%2e/Accounts.json" },
+				{ path: "/2010-04-01/Accounts/{AccountSid}/Messages.json?PageSize=1.json" },
+				{ path: "/2010-04-01/Accounts/{AccountSid}/Messages.xml" },
+				...['Keys', 'SigningKeys', 'Tokens'].map((name) => ({ method: "POST", path: `/2010-04-01/Accounts/{AccountSid}/${name}.json`, body: {} })),
+				{ path: "/2010-04-01/Accounts/{AccountSid}/%4beys.json" },
+				{ path: "/2010-04-01/Accounts/{AccountSid}/%254beys.json" },
+				{ path: "/2010-04-01/Accounts/{AccountSid}//Messages.json" },
+				{ query: { api_key: "override" } }, { query: { PageSize: {} } }, { body: { To: "no GET body" } },
+				{ method: "POST", body: [] }, { method: "POST", body: { Nested: { unsafe: true } } },
+				{ method: "POST", body: { Invalid: null } },
+			]) {
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await twilio.request(${JSON.stringify({ ...base, ...override })})` } });
+				assert.equal(result.isError, true, JSON.stringify(override));
+			}
+		});
+		assert.equal(calls, 0);
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("Twilio shares read retries and redaction without replaying sends or other writes", async () => {
+	const originalFetch = globalThis.fetch;
+	const encoded = Buffer.from(`${TEST_SECRETS.TWILIO_API_KEY_SID}:${TEST_SECRETS.TWILIO_API_KEY_SECRET}`).toString("base64");
+	let calls = 0;
+	let status = 503;
+	let recover = false;
+	globalThis.fetch = async (input, init) => {
+		if (new URL(new Request(input, init).url).hostname !== "api.twilio.com") return originalFetch(input, init);
+		calls++;
+		if (recover && calls > 1) return Response.json({ messages: [] });
+		return Response.json({ code: 21614, message: `Provider error ${TEST_SECRETS.TWILIO_API_KEY_SID} ${TEST_SECRETS.TWILIO_API_KEY_SECRET} ${encoded}` },
+			{ status, headers: { "Retry-After": "0", "X-Request-Id": `request-${TEST_SECRETS.TWILIO_API_KEY_SECRET}` } });
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			const invoke = (method) => client.callTool({ name: "code", arguments: { code: `async () => await twilio.request({ method: '${method}', path: '/2010-04-01/Accounts/{AccountSid}/Messages.json' ${method === "POST" ? ", body: { To: '+15555550123', From: '+15555550456', Body: 'fixture' }" : ""} })` } });
+			recover = true;
+			assert.equal((await invoke("GET")).isError, undefined);
+			assert.equal(calls, 2);
+			recover = false;
+			for (status of [400, 401, 403, 429, 503]) {
+				calls = 0;
+				const result = await invoke("POST");
+				assert.equal(result.isError, true);
+				assert.equal(calls, 1);
+				assert.match(result.content[0].text, new RegExp(`HTTP ${status}`));
+				assert.match(result.content[0].text, /safe_to_replay=false/);
+				assert.match(result.content[0].text, status === 503 ? /outcome=unknown/ : /outcome=rejected/);
+				if (status !== 401) assert.match(result.content[0].text, /code=21614/);
+				for (const secret of [TEST_SECRETS.TWILIO_API_KEY_SID, TEST_SECRETS.TWILIO_API_KEY_SECRET, encoded])
+					assert.ok(!JSON.stringify(result).includes(secret));
+			}
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("Twilio does not follow redirects or replay successful writes with unsupported response formats", async () => {
+	const originalFetch = globalThis.fetch;
+	let mode = "redirect";
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		const url = new URL(new Request(input, init).url);
+		if (!["api.twilio.com", "evil.example"].includes(url.hostname)) return originalFetch(input, init);
+		assert.equal(url.hostname, "api.twilio.com");
+		calls++;
+		if (mode === "network") throw new Error("private network error test-twilio-api-secret");
+		return mode === "redirect" ? new Response(null, { status: 302, headers: { Location: "https://evil.example/" } })
+			: new Response("private-media-data", { headers: { "Content-Type": "image/jpeg; filename=private-header" } });
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			for (mode of ["redirect", "media", "network"]) {
+				calls = 0;
+				const result = await client.callTool({ name: "code", arguments: { code: "async () => await twilio.request({ method: 'POST', path: '/2010-04-01/Accounts/{AccountSid}/Messages.json', body: {} })" } });
+				assert.equal(result.isError, true);
+				assert.equal(calls, 1);
+				assert.match(result.content[0].text, mode === "redirect" ? /HTTP 302/ : mode === "media" ? /unsupported_response.*outcome=succeeded/ : /outcome=unknown/);
+				assert.doesNotMatch(JSON.stringify(result), /private-media-data|private-header|private network error|test-twilio-api-secret/);
+			}
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("Twilio fails clearly without dispatch when credentials are missing or malformed", async () => {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		if (new URL(new Request(input, init).url).hostname !== "api.twilio.com") return originalFetch(input, init);
+		calls++;
+		return Response.json({ unexpected: true });
+	};
+	try {
+		for (const secrets of [{ TWILIO_ACCOUNT_SID: "" }, { TWILIO_API_KEY_SID: "" }, { TWILIO_API_KEY_SECRET: "" },
+			{ TWILIO_ACCOUNT_SID: "private-invalid-account" }, { TWILIO_API_KEY_SID: "private-invalid-key" }]) {
+			const harness = createConciergeHarness(true, secrets);
+			const client = new Client({ name: "twilio-config-test", version: "1" });
+			try {
+				const listener = await harness.listen();
+				await client.connect(new StreamableHTTPClientTransport(new URL("/debug/mcp", listener.url)));
+				const result = await client.callTool({ name: "code", arguments: { code: "async () => await twilio.request({ method: 'GET', path: '/2010-04-01/Accounts/{AccountSid}/Messages.json' })" } });
+				assert.equal(result.isError, true);
+				assert.match(result.content[0].text, /must be configured|valid Account SID and API Key SID/);
+				assert.doesNotMatch(JSON.stringify(result), /private-invalid|test-twilio-api-secret/);
+			} finally { await client.close(); await harness.close(); }
+		}
+		assert.equal(calls, 0);
+	} finally { globalThis.fetch = originalFetch; }
 });
 
 test("discovers UniFi and preserves native Site Manager, Network and Protect requests and responses", async () => {

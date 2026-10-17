@@ -16,6 +16,7 @@ import { GoogleWorkspaceAuth } from "./integrations/google/auth";
 import { GoogleConnector } from "./integrations/google/connector";
 import { MapsConnector } from "./integrations/maps/connector";
 import { UnifiConnector } from "./integrations/unifi/connector";
+import { TwilioConnector } from "./integrations/twilio/connector";
 import { ConnectorRequests } from "./connector-requests";
 import { boundMcpRequest, MAX_CODE_CHARS } from "./mcp-requests";
 import { observeCodeExecution } from "./code-execution";
@@ -66,6 +67,7 @@ function createConciergeServer(
 			new GoogleConnector(ctx, env, googleAuth, requests, usage),
 			new MapsConnector(ctx, env, requests, usage),
 			new UnifiConnector(ctx, env, requests, images, usage),
+			new TwilioConnector(ctx, env, requests, usage),
 		],
 		ctx,
 		executor: new DynamicWorkerExecutor({ loader: env.LOADER }),
@@ -79,6 +81,8 @@ function createConciergeServer(
 				"Use maps.request for public businesses, places, ratings, hours, reviews, directions, travel times, distances, and route matrices through Places API (New) and Routes API. Prefer these APIs over reading Google Maps webpages for supported tasks. Consult official API documentation; pass field masks in query.fields. Requests may incur charges; select only needed fields and preserve Google Maps attribution.",
 			unifi:
 				"Use unifi.request for UniFi console discovery, networking/Wi-Fi clients and devices, Protect camera/NVR status and settings, and JPEG camera snapshots through official cloud APIs. Start with GET /v1/hosts, then use console-specific Network/Protect integration paths. Permitted writes and deletes are supported; no NAS files, video, or event streaming.",
+			twilio:
+				"Use twilio.request for core Twilio REST API access: send SMS/MMS, read incoming/outgoing message history and delivery status, manage voice calls, phone numbers, and usage. Native account-scoped .json paths and form parameters; credentials are server-owned. Writes can incur charges. No personal iMessage history, webhook receiver, or agent wakeups.",
 		},
 	}).description;
 

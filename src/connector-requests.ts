@@ -59,7 +59,7 @@ export type ApiFailure = {
 	safeToReplay?: boolean;
 	outcome?: Outcome;
 };
-type ResponseOptions = Pick<HttpRequest, "format" | "sensitive" | "classifyError">;
+type ResponseOptions = Pick<HttpRequest, "format" | "sensitive" | "sensitiveValues" | "classifyError">;
 type HttpRequest = Operation & {
 	url: URL;
 	method?: string;
@@ -67,6 +67,7 @@ type HttpRequest = Operation & {
 	headers?: HeadersInit | (() => Promise<HeadersInit>);
 	format?: ResponseFormat;
 	sensitive?: boolean;
+	sensitiveValues?: readonly string[];
 	classifyError?: (status: number, payload: unknown) => ApiFailure;
 	onResponse?: (response: Response, headers: Headers) => void;
 };
@@ -325,7 +326,7 @@ export class ConnectorRequests {
 	httpError(
 		response: Response,
 		payload: unknown,
-		options: Pick<HttpRequest, "classifyError" | "sensitive"> = {},
+		options: Pick<HttpRequest, "classifyError" | "sensitive" | "sensitiveValues"> = {},
 		headers = new Headers(),
 	): ConnectorError {
 		const status = response.status;
@@ -341,6 +342,7 @@ export class ConnectorRequests {
 						? "rate_limited"
 						: "http");
 		const secrets = [
+			...(options.sensitiveValues ?? []),
 			headers.get("Authorization")?.replace(/^\S+\s+/, ""),
 			headers.get("X-API-Key"),
 			headers.get("X-Goog-Api-Key"),

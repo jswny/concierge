@@ -7,3 +7,4 @@ COOKIE_ENCRYPTION_KEY=<generate using, eg, `openssl rand -hex 32`>
 TWILIO_ACCOUNT_SID=<Twilio Account SID, AC...>
 TWILIO_API_KEY_SID=<Twilio API Key SID, SK...>
 TWILIO_API_KEY_SECRET=<Twilio API Key secret, not the account Auth Token>
+EXA_API_KEY=<Create at https://dashboard.exa.ai/api-keys>

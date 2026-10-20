@@ -65,6 +65,12 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 			assert.equal(url.pathname, `/2010-04-01/Accounts/AC${"a".repeat(32)}/Messages.json`);
 			return Response.json({ messages: [{ sid: "SMbuild", status: "received" }], next_page_uri: null });
 		}
+		if (url.hostname === "api.exa.ai") {
+			assert.equal(request.headers.get("Authorization"), "Bearer unused-build-test-secret");
+			assert.equal(url.pathname, "/search");
+			assert.deepEqual(await request.json(), { query: "fixture", numResults: 1 });
+			return Response.json({ requestId: "exa-build", results: [{ url: "https://example.com", title: "Example" }] });
+		}
 		if (url.hostname !== "api.ui.com") return originalFetch(input, init);
 		return new Response(Buffer.from(JPEG_BASE64, "base64"), { headers: { "Content-Type": "image/jpeg" } });
 	};
@@ -96,6 +102,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		assert.match(tools[0].description, /- `google`.*Gmail/);
 		assert.match(tools[0].description, /- `unifi`.*unifi\.request/);
 		assert.match(tools[0].description, /- `twilio`.*twilio\.request/);
+		assert.match(tools[0].description, /- `exa`.*exa\.request/);
 		assert.doesNotMatch(tools[0].description, /notion/i);
 		assert.match(tools[0].description, /search for `maps directions`/);
 		const result = await client.callTool({ name: "code", arguments: {
@@ -103,7 +110,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		} });
 		assert.equal(result.isError, undefined);
 		assert.equal(result.structuredContent.result.sum, 4);
-		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["cloudflare.read_webpage_as_markdown", "google.request", "maps.request", "twilio.request", "unifi.request"]);
+		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["cloudflare.read_webpage_as_markdown", "exa.request", "google.request", "maps.request", "twilio.request", "unifi.request"]);
 		const page = await client.callTool({ name: "code", arguments: {
 			code: "async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/test' })",
 		} });
@@ -125,6 +132,11 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		} });
 		assert.equal(messages.isError, undefined, JSON.stringify(messages));
 		assert.deepEqual(messages.structuredContent.result, { messages: [{ sid: "SMbuild", status: "received" }], next_page_uri: null });
+		const search = await client.callTool({ name: "code", arguments: {
+			code: "async () => await exa.request({ method: 'POST', path: '/search', body: { query: 'fixture', numResults: 1 } })",
+		} });
+		assert.equal(search.isError, undefined, JSON.stringify(search));
+		assert.deepEqual(search.structuredContent.result, { requestId: "exa-build", results: [{ url: "https://example.com", title: "Example" }] });
 	} finally {
 		globalThis.fetch = originalFetch;
 		await client.close();

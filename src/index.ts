@@ -17,6 +17,7 @@ import { GoogleConnector } from "./integrations/google/connector";
 import { MapsConnector } from "./integrations/maps/connector";
 import { UnifiConnector } from "./integrations/unifi/connector";
 import { TwilioConnector } from "./integrations/twilio/connector";
+import { ExaConnector } from "./integrations/exa/connector";
 import { ConnectorRequests } from "./connector-requests";
 import { boundMcpRequest, MAX_CODE_CHARS } from "./mcp-requests";
 import { observeCodeExecution } from "./code-execution";
@@ -68,6 +69,7 @@ function createConciergeServer(
 			new MapsConnector(ctx, env, requests, usage),
 			new UnifiConnector(ctx, env, requests, images, usage),
 			new TwilioConnector(ctx, env, requests, usage),
+			new ExaConnector(ctx, env, requests, usage),
 		],
 		ctx,
 		executor: new DynamicWorkerExecutor({ loader: env.LOADER }),
@@ -83,6 +85,8 @@ function createConciergeServer(
 				"Use unifi.request for UniFi console discovery, networking/Wi-Fi clients and devices, Protect camera/NVR status and settings, and JPEG camera snapshots through official cloud APIs. Start with GET /v1/hosts, then use console-specific Network/Protect integration paths. Permitted writes and deletes are supported; no NAS files, video, or event streaming.",
 			twilio:
 				"Use twilio.request for core Twilio REST API access: send SMS/MMS, read incoming/outgoing message history and delivery status, manage voice calls, phone numbers, and usage. Native account-scoped .json paths and form parameters; credentials are server-owned. Writes can incur charges. No personal iMessage history, webhook receiver, or agent wakeups.",
+			exa:
+				"Use exa.request for external web search, research, page content extraction, highlights, similar links and cited answers through Exa AI's JSON API. Native request bodies and responses; credentials are server-owned. Requests can incur charges. No streaming, background polling or agent wakeups.",
 		},
 	}).description;
 

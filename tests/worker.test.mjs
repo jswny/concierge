@@ -39,6 +39,7 @@ const TEST_SECRETS = {
 	TWILIO_ACCOUNT_SID: `AC${"a".repeat(32)}`,
 	TWILIO_API_KEY_SID: `SK${"b".repeat(32)}`,
 	TWILIO_API_KEY_SECRET: "test-twilio-api-secret",
+	EXA_API_KEY: "test-exa-api-key",
 };
 
 const debugServer = createConciergeHarness(true);
@@ -709,7 +710,7 @@ test("serves the code tool over the modern MCP protocol", async () => {
 			assert.match(tool.description ?? "", /codemode\.search.*connector method names/s);
 			const connectorSection = (tool.description ?? "").split("## Available connectors\n")[1]?.split("\n## ")[0];
 			assert.ok(connectorSection);
-			for (const name of ["cloudflare", "google", "maps", "unifi", "twilio"]) {
+			for (const name of ["cloudflare", "google", "maps", "unifi", "twilio", "exa"]) {
 				assert.match(connectorSection, new RegExp("- `" + name + "`"));
 			}
 			assert.match(connectorSection, /Routes API/);
@@ -1262,6 +1263,220 @@ test("rejects invalid Google request arguments before outbound calls", async () 
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
+});
+
+test("discovers Exa and preserves native search, contents, answers and resource requests", async () => {
+	const originalFetch = globalThis.fetch;
+	const cases = [
+		{ options: { method: "POST", path: "/search", body: { query: "Cloudflare Workers", type: "auto", numResults: 1, includeDomains: ["developers.cloudflare.com"], contents: { highlights: true, text: { maxCharacters: 1000 } }, outputSchema: { type: "object", properties: { title: { type: "string" } } } } }, result: { requestId: "search-id", results: [{ url: "https://developers.cloudflare.com/workers/", title: "Workers", highlights: ["A source excerpt"], publishedDate: "2026-10-01", score: 0.9 }], costDollars: { total: 0.005 }, warnings: [{ tag: "fixture-warning" }] } },
+		{ options: { method: "POST", path: "/contents", body: { urls: ["https://example.com/page", "https://example.com/missing"], text: { maxCharacters: 500 }, maxAgeHours: 0 } }, result: { results: [{ url: "https://example.com/page", text: "Native source text" }], statuses: [{ id: "https://example.com/page", status: "success" }, { id: "https://example.com/missing", status: "error", error: { tag: "CRAWL_NOT_FOUND" } }] } },
+		{ options: { method: "POST", path: "/findSimilar", body: { url: "https://example.com/page", numResults: 1 } }, result: { results: [{ url: "https://example.org/similar" }] } },
+		{ options: { method: "POST", path: "/answer", body: { query: "What is Workers?", stream: false } }, result: { answer: "An answer", citations: [{ url: "https://developers.cloudflare.com/workers/", title: "Workers" }] } },
+		{ options: { method: "POST", path: "/agent/runs", body: { query: "Research a topic", outputSchema: { type: "object", properties: { facts: { type: "array", items: { type: "string" } } } } } }, result: { id: "run-fixture", status: "queued", costDollars: null } },
+		{ options: { method: "GET", path: "/agent/runs/run-fixture/events", query: { cursor: "native+cursor", limit: 1 } }, result: { data: [{ id: "event-id", type: "run.completed" }], nextCursor: "next+cursor", hasMore: true } },
+		{ options: { method: "POST", path: "/monitors", body: { name: "Updates", search: { query: "Updates", numResults: 1 } } }, result: { id: "monitor-id", status: "active" } },
+		{ options: { method: "PATCH", path: "/monitors/monitor-id", body: { status: "paused" } }, result: { id: "monitor-id", status: "paused" } },
+		{ options: { method: "GET", path: "/batches", query: { limit: 1 } }, result: { data: [], hasMore: false } },
+		{ options: { method: "DELETE", path: "/agent/runs/run-fixture" }, result: null },
+	];
+	let current;
+	let calls = 0;
+	let dispatchFailure;
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		const url = new URL(request.url);
+		if (url.hostname !== "api.exa.ai") return originalFetch(input, init);
+		calls++;
+		try {
+			assert.equal(request.headers.get("Authorization"), `Bearer ${TEST_SECRETS.EXA_API_KEY}`);
+			assert.equal(request.headers.get("Accept"), "application/json");
+			assert.equal(request.headers.has("X-API-Key"), false);
+			assert.equal(request.headers.has("X-Goog-Api-Key"), false);
+			assert.equal(request.method, current.options.method);
+			assert.equal(url.pathname, current.options.path);
+			assert.deepEqual(Object.fromEntries(url.searchParams), Object.fromEntries(Object.entries(current.options.query ?? {}).map(([k, v]) => [k, String(v)])));
+			if (current.options.body !== undefined) {
+				assert.equal(request.headers.get("Content-Type"), "application/json");
+				assert.deepEqual(await request.json(), current.options.body);
+			} else assert.equal(await request.text(), "");
+			return current.result === null ? new Response(null, { status: 204 }) : Response.json(current.result);
+		} catch (error) { dispatchFailure = error; throw error; }
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			assert.match((await client.listTools()).tools[0].description, /exa\.request/);
+			for (const query of ["exa", "external web search", "page content extraction", "similar links", "cited answers"]) {
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await codemode.search(${JSON.stringify(query)})` } });
+				assert.ok(result.structuredContent.result.results.some((match) => match.path === "exa.request"), query);
+			}
+			const docs = await client.callTool({ name: "code", arguments: { code: "async () => await codemode.describe('exa.request')" } });
+			assert.match(JSON.stringify(docs), /per-URL statuses/);
+			assert.match(JSON.stringify(docs), /30-second/);
+			for (current of cases) {
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await exa.request(${JSON.stringify(current.options)})` } });
+				if (dispatchFailure) throw dispatchFailure;
+				assert.equal(result.isError, undefined, JSON.stringify(result));
+				assert.deepEqual(result.structuredContent.result, current.result);
+				assert.deepEqual(JSON.parse(result.content[0].text), current.result);
+				assert.ok(!JSON.stringify(result).includes(TEST_SECRETS.EXA_API_KEY));
+			}
+		});
+		assert.equal(calls, cases.length);
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("Exa rejects credential overrides, alternate origins, invalid bodies and streaming before dispatch", async () => {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		if (!new URL(new Request(input, init).url).hostname.endsWith("exa.ai")) return originalFetch(input, init);
+		calls++;
+		return Response.json({ unexpected: true });
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			const base = { method: "POST", path: "/search", body: { query: "fixture" } };
+			for (const override of [
+				{ method: "OPTIONS" }, { apiKey: "override" }, { headers: { Authorization: "Bearer override" } },
+				{ url: "https://api.exa.ai/search" }, { path: "https://api.exa.ai/search" },
+				{ path: "//admin-api.exa.ai/team-management/api-keys" }, { path: "/search?api_key=override" },
+				{ path: "/%2fsearch" }, { path: "/%25search" }, { path: "/agent//runs" },
+				{ query: { api_key: "override" } }, { query: { limit: {} } }, { body: [] }, { body: null }, { body: "not an object" },
+				{ method: "GET", body: {} }, { body: { query: "fixture", stream: true } },
+				{ query: { stream: true } }, { query: { stream: "true" } }, { query: { stream: ["true"] } },
+			]) {
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await exa.request(${JSON.stringify({ ...base, ...override })})` } });
+				assert.equal(result.isError, true, JSON.stringify(override));
+			}
+		});
+		assert.equal(calls, 0);
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("Exa retries known retrievals but never replays resource mutations", async () => {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	let status = 503;
+	let recover = true;
+	globalThis.fetch = async (input, init) => {
+		if (new URL(new Request(input, init).url).hostname !== "api.exa.ai") return originalFetch(input, init);
+		calls++;
+		if (recover && calls > 1) return Response.json({ results: [] });
+		return Response.json({ tag: "SERVICE_OVERLOADED", requestId: "exa-request-id", error: `Provider error ${TEST_SECRETS.EXA_API_KEY}` }, { status, headers: { "Retry-After": "0" } });
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			const invoke = (options) => client.callTool({ name: "code", arguments: { code: `async () => await exa.request(${JSON.stringify(options)})` } });
+			for (const path of ["/search", "/contents", "/findSimilar", "/answer"]) {
+				calls = 0;
+				const result = await invoke({ method: "POST", path, body: { fixture: true } });
+				assert.equal(result.isError, undefined, JSON.stringify(result));
+				assert.equal(calls, 2, path);
+			}
+			calls = 0;
+			status = 429;
+			assert.equal((await invoke({ method: "GET", path: "/agent/runs/fixture" })).isError, undefined);
+			assert.equal(calls, 2);
+			recover = false;
+			for (status of [429, 503]) for (const options of [
+				{ method: "POST", path: "/agent/runs", body: { query: "fixture" } },
+				{ method: "POST", path: "/batches", body: {} },
+				{ method: "POST", path: "/monitors", body: {} },
+				{ method: "PATCH", path: "/monitors/fixture", body: { status: "paused" } },
+				{ method: "DELETE", path: "/agent/runs/fixture" },
+				{ method: "PUT", path: "/search", body: {} },
+			]) {
+				calls = 0;
+				const result = await invoke(options);
+				assert.equal(result.isError, true);
+				assert.equal(calls, 1, JSON.stringify(options));
+				assert.match(result.content[0].text, /safe_to_replay=false/);
+				assert.match(result.content[0].text, status === 503 ? /outcome=unknown/ : /outcome=rejected/);
+				assert.match(result.content[0].text, /code=SERVICE_OVERLOADED.*request_id=exa-request-id/);
+				assert.doesNotMatch(JSON.stringify(result), /test-exa-api-key/);
+			}
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("Exa classifies native errors and preserves billing failures without leaking credentials", async () => {
+	const originalFetch = globalThis.fetch;
+	let status = 400;
+	let payload;
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		if (new URL(new Request(input, init).url).hostname !== "api.exa.ai") return originalFetch(input, init);
+		calls++;
+		return Response.json(payload, { status });
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			for (status of [400, 401, 402, 403]) {
+				calls = 0;
+				payload = { requestId: `request-${TEST_SECRETS.EXA_API_KEY}`, tag: status === 402 ? "NO_MORE_CREDITS" : "INVALID_REQUEST_BODY", error: `Provider error ${TEST_SECRETS.EXA_API_KEY}` };
+				const result = await client.callTool({ name: "code", arguments: { code: "async () => await exa.request({ method: 'POST', path: '/search', body: { query: 'fixture' } })" } });
+				assert.equal(result.isError, true);
+				assert.equal(calls, 1);
+				assert.match(result.content[0].text, new RegExp(`HTTP ${status}`));
+				assert.match(result.content[0].text, /retryable=false/);
+				assert.doesNotMatch(JSON.stringify(result), /test-exa-api-key/);
+				if (status === 402) assert.match(result.content[0].text, /code=NO_MORE_CREDITS/);
+				if (status === 401 || status === 403) assert.doesNotMatch(JSON.stringify(result), /Provider error/);
+			}
+			status = 400;
+			payload = { error: { type: "INVALID_REQUEST", code: "INVALID_OUTPUT_SCHEMA", message: `Bad schema ${TEST_SECRETS.EXA_API_KEY}` } };
+			const result = await client.callTool({ name: "code", arguments: { code: "async () => await exa.request({ method: 'POST', path: '/agent/runs', body: { query: 'fixture' } })" } });
+			assert.match(result.content[0].text, /code=INVALID_OUTPUT_SCHEMA/);
+			assert.doesNotMatch(JSON.stringify(result), /test-exa-api-key/);
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("Exa rejects redirects, SSE, binary and invalid JSON without replaying successful writes", async () => {
+	const originalFetch = globalThis.fetch;
+	let mode;
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		const url = new URL(new Request(input, init).url);
+		if (!["api.exa.ai", "evil.example"].includes(url.hostname)) return originalFetch(input, init);
+		assert.equal(url.hostname, "api.exa.ai");
+		calls++;
+		if (mode === "redirect") return new Response(null, { status: 302, headers: { Location: "https://evil.example/" } });
+		if (mode === "network") throw new Error("private network failure test-exa-api-key");
+		return new Response("private-response-body", { headers: { "Content-Type": mode === "sse" ? "text/event-stream" : mode === "binary" ? "image/jpeg" : "application/json" } });
+	};
+	try {
+		await withMcpClient(undefined, async (client) => {
+			for (mode of ["redirect", "sse", "binary", "json", "network"]) {
+				calls = 0;
+				const result = await client.callTool({ name: "code", arguments: { code: "async () => await exa.request({ method: 'POST', path: '/agent/runs', body: { query: 'fixture' } })" } });
+				assert.equal(result.isError, true);
+				assert.equal(calls, 1);
+				assert.match(result.content[0].text, mode === "redirect" ? /HTTP 302/ : mode === "network" ? /outcome=unknown/ : /outcome=succeeded/);
+				assert.doesNotMatch(JSON.stringify(result), /private-response-body|private network failure|test-exa-api-key/);
+			}
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("Exa fails clearly before dispatch when its API key is missing", async () => {
+	const harness = createConciergeHarness(true, { EXA_API_KEY: "" });
+	const client = new Client({ name: "exa-config-test", version: "1" });
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		if (new URL(new Request(input, init).url).hostname !== "api.exa.ai") return originalFetch(input, init);
+		calls++;
+		return Response.json({ unexpected: true });
+	};
+	try {
+		const listener = await harness.listen();
+		await client.connect(new StreamableHTTPClientTransport(new URL("/debug/mcp", listener.url)));
+		const result = await client.callTool({ name: "code", arguments: { code: "async () => await exa.request({ method: 'POST', path: '/search', body: { query: 'fixture' } })" } });
+		assert.equal(result.isError, true);
+		assert.match(result.content[0].text, /EXA_API_KEY is not configured/);
+		assert.equal(calls, 0);
+	} finally { globalThis.fetch = originalFetch; await client.close(); await harness.close(); }
 });
 
 test("discovers Twilio and preserves native messages, form bodies, account paths and pagination", async () => {

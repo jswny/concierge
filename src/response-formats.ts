@@ -21,6 +21,10 @@ const RESPONSE_FORMATS = {
 
 export type ResponseFormat = keyof typeof RESPONSE_FORMATS;
 
+export type JsonResponseFormat = {
+	[Format in ResponseFormat]: Extract<typeof RESPONSE_FORMATS[Format][number], { kind: "image" }> extends never ? Format : never;
+}[ResponseFormat];
+
 type ResponseType = typeof RESPONSE_TYPES[keyof typeof RESPONSE_TYPES];
 
 export type ImageMimeType = Extract<ResponseType, { kind: "image" }>["mimeType"];

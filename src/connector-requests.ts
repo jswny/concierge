@@ -3,7 +3,7 @@ import { z } from "zod";
 import { apiScalarSchema, type HttpMethod, type QueryValue } from "./connector-inputs";
 import { parseJson, type JsonValue } from "./json";
 import {
-	RESPONSE_TYPES, parseMediaType, responseAccept, responseTypeFor, supportedResponseTypes, type ResponseFormat,
+	RESPONSE_TYPES, parseMediaType, responseAccept, responseTypeFor, supportedResponseTypes, type ResponseFormat, type JsonResponseFormat,
 } from "./response-formats";
 
 export type { QueryValue } from "./connector-inputs";
@@ -74,7 +74,7 @@ type ResponseOptions = {
 	format?: ResponseFormat;
 	sensitive?: boolean;
 	sensitiveValues?: readonly string[];
-	classifyError?: (status: number, payload: ApiPayload | undefined) => ApiFailure;
+	classifyError?: (status: number, payload: JsonValue | undefined) => ApiFailure;
 };
 
 export type RequestAuthentication = {
@@ -252,6 +252,8 @@ export class ConnectorRequests {
 		}
 	}
 
+	request(options: HttpRequest & { format?: JsonResponseFormat }): Promise<JsonValue>;
+	request(options: HttpRequest): Promise<ApiPayload>;
 	request(options: HttpRequest): Promise<ApiPayload> {
 		return this.run(options, async (attempt) => {
 			const authentication = await options.authenticate?.();
@@ -281,38 +283,44 @@ export class ConnectorRequests {
 		});
 	}
 
+	responsePayload(response: Response, attempt: Attempt, options?: ResponseOptions & { format?: JsonResponseFormat }): Promise<JsonValue>;
+	responsePayload(response: Response, attempt: Attempt, options: ResponseOptions): Promise<ApiPayload>;
 	async responsePayload(
 		response: Response,
 		attempt: Attempt,
 		options: ResponseOptions = {},
 	): Promise<ApiPayload> {
-		if (response.ok) attempt.succeeded();
+		if (response.ok) {
+			attempt.succeeded();
 
-		if (response.status === 401 || (!response.ok && options.sensitive)) {
+			return this.readPayload(response, attempt.signal, options.format);
+		}
+
+		if (response.status === 401 || options.sensitive) {
 			await response.body?.cancel();
 			throw this.httpError(response, undefined, options);
 		}
 
-		let payload: ApiPayload | undefined;
+		let payload: JsonValue | undefined;
 
 		try {
 			payload = await this.readPayload(
 				response,
 				attempt.signal,
-				response.ok ? options.format : "json-or-text",
-				response.ok ? undefined : 8192,
+				"json-or-text",
+				8192,
 			);
 		} catch (error) {
-			if (response.ok || attempt.signal.aborted) throw error;
+			if (attempt.signal.aborted) throw error;
 			// Non-JSON or oversized error bodies must not obscure the HTTP failure.
 			payload = undefined;
 		}
 
-		if (!response.ok) throw this.httpError(response, payload, options);
-
-		return payload ?? null;
+		throw this.httpError(response, payload, options);
 	}
 
+	readPayload(response: Response, signal: AbortSignal, format?: JsonResponseFormat, maxBytes?: number): Promise<JsonValue>;
+	readPayload(response: Response, signal: AbortSignal, format: ResponseFormat | undefined, maxBytes?: number): Promise<ApiPayload>;
 	async readPayload(
 		response: Response,
 		signal: AbortSignal,
@@ -389,7 +397,7 @@ export class ConnectorRequests {
 
 	httpError(
 		response: Response,
-		payload: ApiPayload | undefined,
+		payload: JsonValue | undefined,
 		options: Omit<ResponseOptions, "format"> = {},
 	): ConnectorError {
 		const status = response.status;

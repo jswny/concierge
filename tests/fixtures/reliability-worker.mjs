@@ -9,10 +9,14 @@ import { apiRequestSchema, toToolInputSchema } from "../../src/connector-inputs.
 import { defineConnectorTool } from "../../src/connector-tools.ts";
 import { CONNECTOR_DEFINITIONS } from "../../src/connectors.ts";
 import { ConnectorHttp, encodeFormBody } from "../../src/connector-http.ts";
+import { ConnectorImages } from "../../src/connector-images.ts";
+import { GoogleWorkspaceAuth } from "../../src/integrations/google/auth.ts";
+import { UsageLog } from "../../src/usage-logging.ts";
+import { JPEG_BASE64 } from "./jpeg.mjs";
 import { RESPONSE_TYPES, responseAccept, supportedResponseTypes } from "../../src/response-formats.ts";
 
 export default {
-	async fetch(request) {
+	async fetch(request, env, ctx) {
 		const options = await request.json();
 		const runtime = new ConnectorRequests({ timeoutMs: 500, backoffMs: 1, ...options.limits });
 
@@ -51,7 +55,30 @@ export default {
 				return Response.json({ result });
 			}
 
-			if (options.action === "catalog") return Response.json(CONNECTOR_DEFINITIONS.map(({ id, label, hint }) => ({ id, label, hint })));
+			if (options.action === "catalog") {
+				const dependencies = { ctx, env, requests: runtime, images: new ConnectorImages(), googleAuth: new GoogleWorkspaceAuth(env, runtime), usage: new UsageLog() };
+
+				const catalog = await Promise.all(CONNECTOR_DEFINITIONS.map(async (definition) => ({
+					id: definition.id, label: definition.label, hint: definition.hint, description: await definition.create(dependencies).describe(),
+				})));
+
+				return Response.json(catalog);
+			}
+
+			if (options.action === "tool-image") {
+				const images = new ConnectorImages();
+				const bytes = Uint8Array.from(atob(JPEG_BASE64), (char) => char.charCodeAt(0));
+
+				const tool = defineConnectorTool({
+					schema: z.strictObject({}), description: "Test shared image capture.",
+					images: options.noStore ? undefined : images,
+					execute: () => ({ type: "image", mimeType: "image/jpeg", data: bytes }),
+				});
+
+				const result = await tool.execute({}, options.noContext ? undefined : { executionId: "test-execution" });
+
+				return Response.json({ result, resolvedByteLength: images.resolve("test-execution", result).data.byteLength });
+			}
 
 			if (options.action === "tool") {
 				const tool = defineConnectorTool({

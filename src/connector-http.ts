@@ -1,6 +1,7 @@
 import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload, type RequestAuthentication } from "./connector-requests";
 import type { HttpMethod, QueryValue } from "./connector-inputs";
-import { RESPONSE_TYPES, type ResponseFormat } from "./response-formats";
+import { RESPONSE_TYPES, type ResponseFormat, type JsonResponseFormat } from "./response-formats";
+import type { JsonValue } from "./json";
 
 type ApiRequest<Body> = {
 	method: HttpMethod;
@@ -21,7 +22,7 @@ type ApiPolicy<Body> = {
 	validateUrl?(url: URL): void;
 	encodeBody?(body: Body): EncodedBody;
 	authenticate(context: { method: HttpMethod; url: URL }): RequestAuthentication | Promise<RequestAuthentication>;
-	classifyError?: (status: number, payload: ApiPayload | undefined) => ApiFailure;
+	classifyError?: (status: number, payload: JsonValue | undefined) => ApiFailure;
 	onResponse?(response: Response, headers: Headers): void;
 };
 
@@ -29,6 +30,8 @@ type ApiPolicy<Body> = {
 export class ConnectorHttp {
 	constructor(private readonly requests: ConnectorRequests, private readonly identity: { id: string; label: string }) {}
 
+	request<Body>(options: ApiRequest<Body>, policy: ApiPolicy<Body> & { format?: JsonResponseFormat }): Promise<JsonValue>;
+	request<Body>(options: ApiRequest<Body>, policy: ApiPolicy<Body>): Promise<ApiPayload>;
 	request<Body>(options: ApiRequest<Body>, policy: ApiPolicy<Body>): Promise<ApiPayload> {
 		const url = createApiUrl(policy.origin, policy.pathPrefix, options.path, options.query);
 

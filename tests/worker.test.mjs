@@ -3005,11 +3005,34 @@ test("shares bounded reliability behavior across connector operations", async (t
 			for (const entry of catalog) {
 				assert.ok(entry.hint.length > 0);
 				assert.ok(tool.description.includes(entry.hint));
+				assert.equal(entry.description.name, entry.id);
+				assert.ok(Object.keys(entry.description.descriptors).length > 0);
+
+				for (const [method, descriptor] of Object.entries(entry.description.descriptors)) {
+					assert.ok(descriptor.description.length > 0);
+					assert.equal(descriptor.inputSchema.type, "object");
+					assert.equal(descriptor.inputSchema.additionalProperties, false);
+					assert.equal(descriptor.inputSchema.$schema, "http://json-schema.org/draft-07/schema#");
+					assert.ok(!["headers", "credentials", "apiKey", "privateKey", "scopes", "origin"].some((key) => key in descriptor.inputSchema.properties));
+					assert.equal(entry.description.annotations?.[method]?.requiresApproval, undefined);
+					assert.equal(entry.description.annotations?.[method]?.replay, entry.id === "cloudflare" ? "reexecute" : undefined);
+				}
+
 				const result = await client.callTool({ name: "code", arguments: { code: `async () => await codemode.describe(${JSON.stringify(entry.id)})` } });
 				assert.equal(result.isError, undefined);
 				assert.match(JSON.stringify(result.structuredContent.result), new RegExp(entry.id));
 			}
 		});
+	});
+	await t.test("captures connector images generically without exposing raw bytes to Code Mode", async () => {
+		const image = await run({ action: "tool-image" });
+		assert.equal(image.result.type, "image");
+		assert.equal(image.result.mimeType, "image/jpeg");
+		assert.match(image.result.imageId, /^[a-f0-9-]{36}$/);
+		assert.equal(image.result.byteLength, image.resolvedByteLength);
+		assert.equal(image.result.data, undefined);
+		assert.match((await run({ action: "tool-image", noStore: true })).error, /invocation-local image store/);
+		assert.match((await run({ action: "tool-image", noContext: true })).error, /requires a Code Mode invocation/);
 	});
 	await t.test("rejects unsupported approval and rollback definitions before discovery or execution", async () => {
 		for (const metadata of [{ requiresApproval: true }, { requiresApproval: false }]) {

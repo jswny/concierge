@@ -85,6 +85,24 @@ test("MCP Events discovers native filters separately from tools and stays OAuth-
 	assert.equal((await rpc("events/poll")).error.code, -32601);
 });
 
+test("event descriptors use the plain object schema subset accepted by ChatGPT", async () => {
+	const { events } = (await rpc("events/list")).result;
+	assert.ok(events.length > 0);
+	for (const event of events) {
+		for (const schema of [event.inputSchema, event.payloadSchema]) {
+			assert.equal(schema.type, "object");
+			for (const key of ["$schema", "oneOf", "anyOf", "allOf", "not"]) {
+				assert.equal(Object.hasOwn(schema, key), false, `${event.name} must not expose ${key}`);
+			}
+		}
+	}
+	const [event] = events;
+	assert.equal(event.inputSchema.additionalProperties, false);
+	assert.deepEqual(event.inputSchema.required ?? [], []);
+	assert.equal(event.inputSchema.properties.To.pattern, "^\\+[1-9]\\d{1,14}$");
+	assert.deepEqual(event.payloadSchema.required, ["AccountSid", "MessageSid", "From", "To", "Body", "NumMedia"]);
+});
+
 test("Twilio ingress verifies signatures over all parameters and rejects unsafe requests", async () => {
 	const fields = message({ FutureTwilioParameter: "signed too" });
 	assert.equal((await incoming(fields, { "X-Twilio-Signature": "invalid" })).status, 403);

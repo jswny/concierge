@@ -9,6 +9,12 @@ export interface EventSource {
 	matches(args: Record<string, unknown>, data: Record<string, unknown>): boolean;
 }
 
+// Match Cloudflare's reference: ChatGPT event descriptors reject $schema.
+export function eventDescriptorSchema(schema: z.ZodType): Record<string, unknown> {
+	const { $schema: _dialect, ...descriptor } = z.toJSONSchema(schema, { target: "draft-7" });
+	return descriptor;
+}
+
 export const callbackUrl = z.string().max(2048).transform((value, ctx) => {
 	try {
 		const url = new URL(value);

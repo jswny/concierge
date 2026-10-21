@@ -46,6 +46,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 					TWILIO_ACCOUNT_SID: `AC${"a".repeat(32)}`,
 					TWILIO_API_KEY_SID: `SK${"b".repeat(32)}`,
 					TWILIO_API_KEY_SECRET: "build-twilio-secret",
+					TWILIO_WEBHOOK_KEY_ID: `webhooks_sharedkey_${"a".repeat(26)}`,
 				},
 			},
 			{
@@ -91,6 +92,17 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 			fetch: (input, init) => worker.fetch(input, init),
 		}));
 		assert.equal(client.getNegotiatedProtocolVersion(), "2026-07-28");
+		// The stock SDK client strips draft capability keys; check the wire response.
+		const eventDiscovery = await worker.fetch(new URL("/debug/mcp", listener.url), {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "server/discover" },
+			body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "server/discover", params: { _meta: {
+				"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+				"io.modelcontextprotocol/clientInfo": { name: "event-build-test", version: "1" },
+				"io.modelcontextprotocol/clientCapabilities": {},
+			} } }),
+		});
+		assert.deepEqual((await eventDiscovery.json()).result.capabilities.events, { listChanged: false });
 		const tools = (await client.listTools()).tools;
 		assert.deepEqual(tools.map((tool) => tool.name), ["code"]);
 		assert.equal(tools[0].icons, undefined);

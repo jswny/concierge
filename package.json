@@ -9,7 +9,7 @@
     "dev": "vite",
     "start": "npm run dev",
     "preview": "vite preview",
-    "test": "node --test tests/worker.test.mjs",
+    "test": "node --test tests/worker.test.mjs tests/events.test.mjs",
     "test:build": "node --test tests/build.test.mjs",
     "cf-typegen": "wrangler types --config wrangler.jsonc",
     "type-check": "tsc --noEmit"
@@ -23,6 +23,8 @@
     "agents": "0.28.0",
     "jose": "6.2.12",
     "oauth4webapi": "3.8.8",
+    "standardwebhooks": "1.1.1",
+    "twilio": "6.2.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

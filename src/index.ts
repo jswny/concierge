@@ -4,7 +4,7 @@ import {
 	truncateResult,
 	type ProxyToolOutput,
 } from "@cloudflare/codemode";
-import OAuthProvider from "@cloudflare/workers-oauth-provider";
+import OAuthProvider, { getOAuthApi, type OAuthProviderOptions } from "@cloudflare/workers-oauth-provider";
 import { DurableObject } from "cloudflare:workers";
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
@@ -23,6 +23,10 @@ import { boundMcpRequest, MAX_CODE_CHARS } from "./mcp-requests";
 import { observeCodeExecution } from "./code-execution";
 import { ConnectorImages, isImageReference } from "./connector-images";
 import { UsageLog } from "./usage-logging";
+import { McpEvents } from "./mcp-events/service";
+import { registerEventMethods, type EventOwner } from "./mcp-events/protocol";
+import { twilioMessageEvents, MESSAGE_EVENT, type IncomingMessage } from "./integrations/twilio/events";
+import { handleTwilioWebhook, hasTwilioWebhookKey, TWILIO_WEBHOOK_PATH } from "./integrations/twilio/webhook";
 
 export { CodemodeRuntime } from "@cloudflare/codemode";
 
@@ -53,6 +57,8 @@ function createConciergeServer(
 	env: DebugEnv,
 	googleAuth: GoogleWorkspaceAuth,
 	requests: ConnectorRequests,
+	events: McpEvents,
+	eventOwner: () => Promise<EventOwner>,
 ) {
 	const images = new ConnectorImages();
 	const usage = new UsageLog();
@@ -62,6 +68,7 @@ function createConciergeServer(
 		icons: MCP_ICONS,
 	});
 	server.server.registerCapabilities({ tools: { listChanged: false } });
+	if (hasTwilioWebhookKey(env)) registerEventMethods(server, [twilioMessageEvents], events, eventOwner);
 	const runtime = createCodemodeRuntime({
 		connectors: [
 			new CloudflareConnector(ctx, env, requests, usage),
@@ -84,7 +91,7 @@ function createConciergeServer(
 			unifi:
 				"Use unifi.request for UniFi console discovery, networking/Wi-Fi clients and devices, Protect camera/NVR status and settings, and JPEG camera snapshots through official cloud APIs. Start with GET /v1/hosts, then use console-specific Network/Protect integration paths. Permitted writes and deletes are supported; no NAS files, video, or event streaming.",
 			twilio:
-				"Use twilio.request for core Twilio REST API access: send SMS/MMS, read incoming/outgoing message history and delivery status, manage voice calls, phone numbers, and usage. Native account-scoped .json paths and form parameters; credentials are server-owned. Writes can incur charges. No personal iMessage history, webhook receiver, or agent wakeups.",
+				"Use twilio.request for core Twilio REST API access: send SMS/MMS, read incoming/outgoing message history and delivery status, manage voice calls, phone numbers, and usage. Native account-scoped .json paths and form parameters; credentials are server-owned. Writes can incur charges. When inbound webhooks are configured, event-capable clients can separately subscribe to twilio.message.received through MCP Events. No personal iMessage history or binary media delivery.",
 			exa:
 				"Use exa.request for external web search, research, page content extraction, highlights, similar links and cited answers through Exa AI's JSON API. Native request bodies and responses; credentials are server-owned. Requests can incur charges. No streaming, background polling or agent wakeups.",
 		},
@@ -268,11 +275,35 @@ async function handleMcpRequest(request: Request, env: DebugEnv) {
 export class ConciergeMcpRuntime extends DurableObject<DebugEnv> {
 	private readonly requests = new ConnectorRequests();
 	private readonly googleAuth = new GoogleWorkspaceAuth(this.env, this.requests);
+	private readonly events = new McpEvents(this.ctx, this.env.COOKIE_ENCRYPTION_KEY, [twilioMessageEvents], async (owner) => {
+		if (owner.grantId === "local-debug") return this.env.CONCIERGE_DEBUG === "true" && owner.userId === "local-debug";
+		const oauth = getOAuthApi(oauthOptions, this.env);
+		let cursor: string | undefined;
+		for (let page = 0; page < 16; page++) {
+			const grants = await oauth.listUserGrants(owner.userId, { limit: 100, cursor });
+			if (grants.items.some((grant) => grant.id === owner.grantId && grant.clientId === owner.clientId && (!grant.expiresAt || grant.expiresAt * 1000 > Date.now()))) return true;
+			if (!grants.cursor) return false;
+			cursor = grants.cursor;
+		}
+		return false;
+	});
+
+	receiveTwilioMessage(message: IncomingMessage) { return this.events.publish(MESSAGE_EVENT, message.MessageSid, message); }
+	alarm() { return this.events.alarm(); }
 
 	fetch(request: Request) {
 		const pathname = new URL(request.url).pathname;
 		const route = pathname === "/debug/mcp" ? "/debug/mcp" : "/mcp";
-		return createMcpHandler(() => createConciergeServer(this.ctx, this.env, this.googleAuth, this.requests), {
+		const eventOwner = async (): Promise<EventOwner> => {
+			if (route === "/debug/mcp" && this.env.CONCIERGE_DEBUG === "true") {
+				return { userId: "local-debug", clientId: "local-debug", grantId: "local-debug", expiresAt: Date.now() + 60 * 60_000 };
+			}
+			const bearer = /^Bearer ([^\s]+)$/i.exec(request.headers.get("Authorization") ?? "")?.[1];
+			const token = bearer ? await getOAuthApi(oauthOptions, this.env).unwrapToken<Record<string, unknown>>(bearer) : null;
+			if (!token || ![token.audience].flat().includes("https://concierge.j1.io/mcp")) throw new Error("Authentication required.");
+			return { userId: token.userId, clientId: token.grant.clientId, grantId: token.grantId, expiresAt: token.expiresAt * 1000 };
+		};
+		return createMcpHandler(() => createConciergeServer(this.ctx, this.env, this.googleAuth, this.requests, this.events, eventOwner), {
 			allowedHostnames: MCP_ALLOWED_HOSTNAMES,
 			route,
 		})(
@@ -295,7 +326,7 @@ const debugMcpHandler = {
 	},
 };
 
-const oauthProvider = new OAuthProvider<DebugEnv>({
+const oauthOptions: OAuthProviderOptions<DebugEnv> = {
 	apiHandler: oauthMcpHandler,
 	apiRoute: "/mcp",
 	authorizeEndpoint: "/authorize",
@@ -303,11 +334,15 @@ const oauthProvider = new OAuthProvider<DebugEnv>({
 	defaultHandler: { fetch: handleAccessRequest },
 	resourceMetadata: { resource: "https://concierge.j1.io/mcp" },
 	tokenEndpoint: "/token",
-});
+};
+const oauthProvider = new OAuthProvider<DebugEnv>(oauthOptions);
 
 export default {
 	fetch(request: Request, env: DebugEnv, ctx: ExecutionContext) {
 		const url = new URL(request.url);
+		if (url.pathname === TWILIO_WEBHOOK_PATH) {
+			return handleTwilioWebhook(request, env, (message) => env.CONCIERGE_MCP.getByName("default").receiveTwilioMessage(message));
+		}
 		if (url.pathname === "/debug/mcp") {
 			if (env.CONCIERGE_DEBUG?.trim().toLowerCase() !== "true") {
 				return new Response("Not found", { status: 404 });

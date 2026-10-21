@@ -39,6 +39,8 @@ const TEST_SECRETS = {
 	TWILIO_ACCOUNT_SID: `AC${"a".repeat(32)}`,
 	TWILIO_API_KEY_SID: `SK${"b".repeat(32)}`,
 	TWILIO_API_KEY_SECRET: "test-twilio-api-secret",
+	TWILIO_WEBHOOK_KEY_ID: `webhooks_sharedkey_${"a".repeat(26)}`,
+	TWILIO_WEBHOOK_KEY_SECRET: "test-twilio-webhook-secret",
 	EXA_API_KEY: "test-exa-api-key",
 };
 
@@ -192,6 +194,9 @@ async function testCimdAuthorization(authMethod) {
 		if (request.url === TEST_SECRETS.ACCESS_JWKS_URL) {
 			return Response.json({ keys: [{ ...publicKey.export({ format: "jwk" }), kid: "test-key" }] });
 		}
+		if (new URL(request.url).hostname === "events-client.example.com") {
+			return Response.json({ challenge: (await request.json()).challenge });
+		}
 		return originalFetch(input, init);
 	};
 
@@ -344,6 +349,26 @@ async function testCimdAuthorization(authMethod) {
 		});
 		assert.equal(refresh.status, 200);
 		const refreshed = await refresh.json();
+		const eventRequest = async (method, params = {}) => {
+			const response = await worker.fetch("https://concierge.j1.io/mcp", {
+				method: "POST",
+				headers: { Authorization: `Bearer ${refreshed.access_token}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream", "MCP-Protocol-Version": MODERN_PROTOCOL_VERSION, "Mcp-Method": method },
+				body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: { ...params, _meta: {
+					"io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+					"io.modelcontextprotocol/clientInfo": { name: "authenticated-events-test", version: "1" },
+					"io.modelcontextprotocol/clientCapabilities": {},
+				} } }),
+			});
+			assert.equal(response.status, 200);
+			return response.json();
+		};
+		assert.equal((await eventRequest("events/list")).result.events[0].name, "twilio.message.received");
+		const subscription = { name: "twilio.message.received", arguments: { To: "+12025550101" }, delivery: { mode: "webhook", url: `https://events-client.example.com/${authMethod}`, secret: `whsec_${randomBytes(32).toString("base64")}` } };
+		const subscribed = await eventRequest("events/subscribe", subscription);
+		assert.equal(subscribed.error, undefined, JSON.stringify(subscribed.error));
+		assert.match(subscribed.result.id, /^sub_/);
+		const { secret: _eventSecret, ...eventDelivery } = subscription.delivery;
+		assert.equal((await eventRequest("events/unsubscribe", { ...subscription, delivery: eventDelivery })).error, undefined);
 		const client = new Client({ name: "authenticated-test", version: "1.0.0" });
 		try {
 			await client.connect(new StreamableHTTPClientTransport(new URL("https://concierge.j1.io/mcp"), {

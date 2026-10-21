@@ -4,7 +4,8 @@ import { UsageLog } from "../../usage-logging";
 import { z } from "zod";
 import { GoogleWorkspaceAuth } from "./auth";
 import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
-import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../connector-inputs";
+import { apiRequestSchema } from "../../connector-inputs";
+import { defineConnectorTool } from "../../connector-tools";
 
 const SERVICES = {
 	gmail: {
@@ -25,12 +26,10 @@ const requestSchema = apiRequestSchema({
 	methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
 	pathPrefix: SERVICES.gmail.pathPrefix,
 	queryArrays: true,
-}).extend({
+}).safeExtend({
 	service: z.enum(serviceNames).describe("Enabled Google Workspace API."),
 	body: z.unknown().optional().describe("Optional JSON request body. MIME messages use the Gmail API's base64url raw field."),
 });
-
-const requestInputSchema = toToolInputSchema(requestSchema);
 
 type GoogleRequest = z.infer<typeof requestSchema>;
 
@@ -54,12 +53,12 @@ export class GoogleConnector extends ObservedConnector<Env> {
 
 	protected tools(): ConnectorTools {
 		return {
-			request: {
+			request: defineConnectorTool({
+				schema: requestSchema,
 				description:
 					"Call a Google Workspace REST API as joe@j1.io. Gmail is enabled for reading, sending, creating, updating, deleting email and managing settings. Consult official API documentation; use relative /gmail/v1/users/me/ paths. Returns the API JSON response, or null for an empty response.",
-				inputSchema: requestInputSchema,
-				execute: async (args) => this.request(parseApiRequest(requestSchema, args)),
-			},
+				execute: (options) => this.request(options),
+			}),
 		};
 	}
 

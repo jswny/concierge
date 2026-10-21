@@ -3,7 +3,8 @@ import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
 import { z } from "zod";
 import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
-import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../connector-inputs";
+import { apiRequestSchema } from "../../connector-inputs";
+import { defineConnectorTool } from "../../connector-tools";
 
 const PLACES_ORIGIN = "https://places.googleapis.com";
 const ROUTES_ORIGIN = "https://routes.googleapis.com";
@@ -16,7 +17,7 @@ const READ_ONLY_POST_PATHS = new Set([
 	...ROUTE_PATHS,
 ]);
 
-const requestSchema = apiRequestSchema({ methods: ["GET", "POST"], pathPrefix: "/" }).extend({
+const requestSchema = apiRequestSchema({ methods: ["GET", "POST"], pathPrefix: "/" }).safeExtend({
 	service: z.enum(["places", "routes"]).describe("Places API (New) for public place data; Routes API for directions, travel time, distance, and matrices."),
 	path: z.string().startsWith("/").describe("Places: /v1/ paths. Routes: POST /directions/v2:computeRoutes or /distanceMatrix/v2:computeRouteMatrix."),
 }).superRefine((options, ctx) => {
@@ -28,8 +29,6 @@ const requestSchema = apiRequestSchema({ methods: ["GET", "POST"], pathPrefix: "
 		if (!ROUTE_PATHS.has(options.path)) ctx.addIssue({ code: "custom", path: ["path"], message: "Expected /directions/v2:computeRoutes or /distanceMatrix/v2:computeRouteMatrix." });
 	}
 });
-
-const requestInputSchema = toToolInputSchema(requestSchema);
 
 export class MapsConnector extends ObservedConnector<Env> {
 	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests, usage: UsageLog) {
@@ -54,12 +53,10 @@ export class MapsConnector extends ObservedConnector<Env> {
 
 	protected tools(): ConnectorTools {
 		return {
-			request: {
+			request: defineConnectorTool({
+				schema: requestSchema,
 				description: "Send an authenticated Google Maps Platform REST request. Places API (New) supports business/place text and nearby search, details, ratings, rating counts, hours, reviews, and photo references. Routes API supports directions, travel time, distance, traffic-aware routing, and origin-destination route matrices. Consult official API documentation; use native paths, query (including fields), and JSON bodies. Returns the API JSON response unchanged. Public data only; no personal Google Maps account access.",
-				inputSchema: requestInputSchema,
-				execute: async (args) => {
-					const options = parseApiRequest(requestSchema, args);
-
+				execute: async (options) => {
 					if (!this.env.GOOGLE_MAPS_API_KEY) throw new Error("GOOGLE_MAPS_API_KEY is not configured.");
 
 					const url = options.service === "places"
@@ -77,7 +74,7 @@ export class MapsConnector extends ObservedConnector<Env> {
 						classifyError: classifyMapsError,
 					});
 				},
-			},
+			}),
 		};
 	}
 }

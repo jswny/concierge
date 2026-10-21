@@ -5,7 +5,8 @@ import {
 	parseRetryAfter,
 } from "../../src/connector-requests.ts";
 import { z } from "zod";
-import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../src/connector-inputs.ts";
+import { apiRequestSchema, toToolInputSchema } from "../../src/connector-inputs.ts";
+import { defineConnectorTool } from "../../src/connector-tools.ts";
 import { RESPONSE_TYPES, responseAccept, supportedResponseTypes } from "../../src/response-formats.ts";
 
 export default {
@@ -32,6 +33,16 @@ export default {
 		if (options.loggingFailure) console.log = () => { throw new Error("test logging failure"); };
 
 		try {
+			if (options.action === "tool") {
+				const tool = defineConnectorTool({
+					description: "Test inferred and validated tool arguments.",
+					schema: z.strictObject({ name: z.string().trim(), count: z.number().default(2) }),
+					execute: (args, context) => ({ ...args, executionId: context?.executionId }),
+				});
+
+				return Response.json({ result: await tool.execute(options.args, { executionId: "test-execution" }), inputSchema: tool.inputSchema });
+			}
+
 			if (options.action === "formats") return Response.json({
 				types: Object.values(RESPONSE_TYPES).map(({ kind, mimeType }) => ({ kind, mimeType })),
 				accept: responseAccept(options.format),
@@ -42,9 +53,9 @@ export default {
 				const base = apiRequestSchema(options.contract);
 
 				const schema = options.contract.extraKeys?.includes("service")
-					? base.extend({ service: z.enum(["gmail"]) }) : base;
+					? base.safeExtend({ service: z.enum(["gmail"]) }) : base;
 
-				return Response.json({ result: parseApiRequest(schema, options.args), inputSchema: toToolInputSchema(schema) });
+				return Response.json({ result: schema.parse(options.args), inputSchema: toToolInputSchema(schema) });
 			}
 
 			if (options.action === "retry-after")

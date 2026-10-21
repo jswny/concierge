@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { apiRequestSchema, apiQueryValueSchema, type QueryValue } from "../src/connector-inputs";
+import { defineConnectorTool } from "../src/connector-tools";
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
 
@@ -13,3 +14,15 @@ export type QueryValuesFollowTheSchema = Assert<Equal<QueryValue, z.infer<typeof
 
 // @ts-expect-error Unsupported HTTP methods must fail at the authoring boundary.
 apiRequestSchema({ methods: ["TRACE"], pathPrefix: "/" });
+
+defineConnectorTool({
+	schema: limitedRequest,
+	description: "Compile-time input inference check.",
+	execute: (args) => {
+		const method: "GET" | "POST" = args.method;
+		// @ts-expect-error The handler must not receive fields absent from its schema.
+		args.nonexistent;
+
+		return method;
+	},
+});

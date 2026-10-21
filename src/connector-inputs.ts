@@ -28,16 +28,9 @@ export function apiRequestSchema<const Methods extends readonly [HttpMethod, ...
 				? "Optional query parameters. Arrays produce repeated parameters."
 				: "Optional scalar query parameters."),
 		body: z.unknown().optional().describe("Optional JSON request body documented for the endpoint."),
+	}).superRefine((options, ctx) => {
+		if (options.method === "GET" && options.body !== undefined) {
+			ctx.addIssue({ code: "custom", path: ["body"], message: "GET requests cannot include a body." });
+		}
 	});
-}
-
-// oxlint-disable-next-line anti-slop/no-unknown-parameters -- This is the shared schema parser at the untrusted Code Mode argument boundary, not an internal domain operation.
-export function parseApiRequest<T extends { method: HttpMethod; body?: unknown }>(schema: z.ZodType<T>, args: unknown): T {
-	const options = schema.parse(args);
-
-	if (options.method === "GET" && options.body !== undefined) {
-		throw new Error("GET requests cannot include a body.");
-	}
-
-	return options;
 }

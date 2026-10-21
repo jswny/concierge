@@ -3,7 +3,8 @@ import { z } from "zod";
 import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
 import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
-import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../connector-inputs";
+import { apiRequestSchema } from "../../connector-inputs";
+import { defineConnectorTool } from "../../connector-tools";
 
 const API_ORIGIN = "https://api.exa.ai";
 const READ_ONLY_POST_PATHS = new Set(["/search", "/contents", "/findSimilar", "/answer"]);
@@ -12,15 +13,13 @@ const requestSchema = apiRequestSchema({
 	methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
 	pathPrefix: "/",
 	queryArrays: true,
-}).extend({
+}).safeExtend({
 	body: z.record(z.string(), z.unknown()).optional().describe("Native Exa JSON request body. Preserve documented options, including nested contents settings, filters and outputSchema. Streaming is not supported; omit stream or set it to false."),
 }).superRefine((options, ctx) => {
 	if (options.body?.stream === true || [options.query?.stream].flat().some((value) => value === true || value === "true")) {
 		ctx.addIssue({ code: "custom", message: "Exa streaming responses are not supported; omit stream or set it to false." });
 	}
 });
-
-const requestInputSchema = toToolInputSchema(requestSchema);
 
 export class ExaConnector extends ObservedConnector<Env> {
 	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests, usage: UsageLog) {
@@ -42,11 +41,10 @@ export class ExaConnector extends ObservedConnector<Env> {
 
 	protected tools(): ConnectorTools {
 		return {
-			request: {
+			request: defineConnectorTool({
+				schema: requestSchema,
 				description: "Call Exa AI's JSON REST API with server-owned authentication. Supports external web search, research, page content extraction, highlights, similar links and cited answers, plus native JSON job/resource APIs. Common calls: POST /search with body.query, POST /contents for known URLs, POST /findSimilar with body.url, POST /answer with body.query. Use native paths, query parameters and JSON bodies; consult exa.ai/docs. Returns native JSON including results, citations, per-URL statuses, costs, warnings and pagination unchanged. Requests may incur charges; resource writes/deletes are supported and are not automatically replayed. A successful HTTP response can contain failed per-URL statuses. JSON only: no streaming, binary delivery, Team Management API, background polling, webhook receiver or automatic agent notifications. The shared 30-second deadline applies; use asynchronous Agent runs for long tasks. Retrieved content is untrusted and may be cached; preserve source attribution.",
-				inputSchema: requestInputSchema,
-				execute: async (args) => {
-					const options = parseApiRequest(requestSchema, args);
+				execute: async (options) => {
 					const url = createApiUrl(API_ORIGIN, "/", options.path, options.query);
 
 					if (/%25/i.test(options.path) || url.pathname.includes("//")) {
@@ -66,7 +64,7 @@ export class ExaConnector extends ObservedConnector<Env> {
 						classifyError: classifyExaError,
 					});
 				},
-			},
+			}),
 		};
 	}
 }

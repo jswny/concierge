@@ -4,7 +4,8 @@ import { z } from "zod";
 import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
 import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
-import { apiRequestSchema, apiScalarSchema, parseApiRequest, toToolInputSchema } from "../../connector-inputs";
+import { apiRequestSchema, apiScalarSchema } from "../../connector-inputs";
+import { defineConnectorTool } from "../../connector-tools";
 
 const API_ORIGIN = "https://api.twilio.com";
 const API_PREFIX = "/2010-04-01/Accounts/";
@@ -13,14 +14,12 @@ const requestSchema = apiRequestSchema({
 	methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
 	pathPrefix: API_PREFIX,
 	queryArrays: true,
-}).extend({
+}).safeExtend({
 	path: z.string().startsWith(API_PREFIX).endsWith(".json")
 		.describe("Native core REST API .json path under /2010-04-01/Accounts/{AccountSid}/. The literal {AccountSid} placeholder is expanded server-side; native paths for the configured account are also accepted. Put pagination query parameters in query."),
 	body: z.record(z.string(), z.union([apiScalarSchema, z.array(apiScalarSchema)]))
 		.optional().describe("Native form parameters, preserving Twilio's case-sensitive names such as To, From, Body, MediaUrl. Arrays produce repeated form fields. Stringify nested values only where the endpoint documentation requires a JSON string."),
 });
-
-const requestInputSchema = toToolInputSchema(requestSchema);
 
 export class TwilioConnector extends ObservedConnector<Env> {
 	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests, usage: UsageLog) {
@@ -41,11 +40,10 @@ export class TwilioConnector extends ObservedConnector<Env> {
 
 	protected tools(): ConnectorTools {
 		return {
-			request: {
+			request: defineConnectorTool({
+				schema: requestSchema,
 				description: "Call the core Twilio REST API with server-owned API-key authentication. Supports SMS/MMS sending, incoming/outgoing message history, delivery status, voice calls, phone numbers and usage, including permitted writes/deletes. Use native /2010-04-01/Accounts/{AccountSid}/... .json paths, query parameters and form body fields; the literal {AccountSid} placeholder expands server-side. Returns native JSON/pagination unchanged or null for empty responses. Messages and calls can incur charges. Account-auth and Keys/SigningKeys/Tokens credential-management endpoints are excluded. No personal phone/iMessage history, binary media delivery or other Twilio API hosts. Configured incoming messages can trigger twilio.message.received for MCP Events clients; subscribe through that protocol, not this method.",
-				inputSchema: requestInputSchema,
-				execute: async (args) => {
-					const options = parseApiRequest(requestSchema, args);
+				execute: async (options) => {
 					const { TWILIO_ACCOUNT_SID: accountSid, TWILIO_API_KEY_SID: keySid, TWILIO_API_KEY_SECRET: secret } = this.env;
 
 					if (!accountSid || !keySid || !secret) {
@@ -90,7 +88,7 @@ export class TwilioConnector extends ObservedConnector<Env> {
 						classifyError: classifyTwilioError,
 					});
 				},
-			},
+			}),
 		};
 	}
 }

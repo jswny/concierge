@@ -5,7 +5,8 @@ import { z } from "zod";
 import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
 import { ConnectorError, ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
-import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../connector-inputs";
+import { apiRequestSchema } from "../../connector-inputs";
+import { defineConnectorTool } from "../../connector-tools";
 
 const API_ORIGIN = "https://external-api.kalshi.com";
 const API_PREFIX = "/trade-api/v2/";
@@ -16,7 +17,6 @@ const requestSchema = apiRequestSchema({
 	queryArrays: true,
 });
 
-const requestInputSchema = toToolInputSchema(requestSchema);
 const keyIdSchema = z.string().trim().min(1).max(256).regex(/^[A-Za-z0-9_-]+$/);
 
 export class KalshiConnector extends ObservedConnector<Env> {
@@ -39,11 +39,10 @@ export class KalshiConnector extends ObservedConnector<Env> {
 
 	protected tools(): ConnectorTools {
 		return {
-			request: {
+			request: defineConnectorTool({
+				schema: requestSchema,
 				description: "Call the authenticated Kalshi production prediction-market REST API for market odds, bid/ask prices, order books, events, series, candlesticks, historical data, volume, liquidity, market rules and private account balances, positions, orders and fills. Use native /trade-api/v2/ paths, HTTP methods, query parameters and JSON bodies; consult docs.kalshi.com. Credentials and request signing are server-owned. Key scopes determine permissions: read-only keys cannot trade; write-capable keys can perform financial mutations. This wrapper has no GET-only restriction. GET reads may retry; writes never automatically replay, even on 429. An accepted order is not necessarily filled; verify unknown outcomes before resubmitting. Returns native JSON, cursor pagination, fixed-point price strings and quantities unchanged, or null for empty responses. No API-key management, alternate/demo/Perps origins, WebSockets, streaming or automatic monitoring. Preserve quote timestamps, spreads, liquidity and settlement rules; prices are not guaranteed probabilities or execution prices.",
-				inputSchema: requestInputSchema,
-				execute: async (args) => {
-					const options = parseApiRequest(requestSchema, args);
+				execute: async (options) => {
 					const url = createApiUrl(API_ORIGIN, API_PREFIX, options.path, options.query);
 
 					if (/%25/i.test(options.path) || url.pathname.includes("//")) {
@@ -65,7 +64,7 @@ export class KalshiConnector extends ObservedConnector<Env> {
 						classifyError: classifyKalshiError,
 					});
 				},
-			},
+			}),
 		};
 	}
 

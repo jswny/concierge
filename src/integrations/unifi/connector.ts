@@ -3,7 +3,8 @@ import { z } from "zod";
 import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
 import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
-import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../connector-inputs";
+import { apiRequestSchema } from "../../connector-inputs";
+import { defineConnectorTool } from "../../connector-tools";
 import { ConnectorImages, isConnectorImage } from "../../connector-images";
 import { RESPONSE_TYPES } from "../../response-formats";
 
@@ -15,8 +16,6 @@ const requestSchema = apiRequestSchema({
 	pathPrefix: "/v1/",
 	queryArrays: true,
 });
-
-const requestInputSchema = toToolInputSchema(requestSchema);
 
 export class UnifiConnector extends ObservedConnector<Env> {
 	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests, private readonly images: ConnectorImages, usage: UsageLog) {
@@ -41,11 +40,10 @@ export class UnifiConnector extends ObservedConnector<Env> {
 
 	protected tools(): ConnectorTools {
 		return {
-			request: {
+			request: defineConnectorTool({
+				schema: requestSchema,
 				description: `Call official UniFi APIs for console discovery and management of networking/Wi-Fi, connected clients, APs, switches, gateways, networks, camera/NVR status, Protect settings and controls, and JPEG camera snapshots. Use native /v1/ Site Manager paths (start with GET /v1/hosts), or /v1/connector/consoles/{consoleId}/proxy/{network|protect}/integration/v1/... for application calls. Encode IDs as path segments. Network siteId values come from the console's Network sites, not Site Manager. Consult developer.ui.com for supported endpoints and installed versions. Authentication is server-owned; permitted writes/deletes are supported and can disrupt network/security settings. Returns native JSON and pagination unchanged, null for empty responses, or an opaque image reference for Protect cameras/{id}/snapshot (${RESPONSE_TYPES.jpeg.mimeType}). Return image references unchanged, directly or nested in an object/array, in the same invocation to deliver MCP images. No raw image bytes in Code Mode; do not stringify references or reuse them across invocations. Retrieve at most four images totaling 4 MiB per invocation. No video, other image formats, NAS/Drive, legacy API, or event streaming.`,
-				inputSchema: requestInputSchema,
-				execute: async (args, execution) => {
-					const options = parseApiRequest(requestSchema, args);
+				execute: async (options, execution) => {
 					const url = createApiUrl(API_ORIGIN, "/v1/", options.path, options.query);
 
 					// The cloud proxy must not become an escape hatch into console-internal APIs.
@@ -77,7 +75,7 @@ export class UnifiConnector extends ObservedConnector<Env> {
 
 					return this.images.capture(execution.executionId, result);
 				},
-			},
+			}),
 		};
 	}
 }

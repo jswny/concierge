@@ -2995,6 +2995,17 @@ test("shares bounded reliability behavior across connector operations", async (t
 		method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(options),
 	})).json();
 
+	await t.test("derives tool schemas and parses arguments before invoking the typed handler", async () => {
+		const valid = await run({ action: "tool", args: { name: "  example  " } });
+		assert.deepEqual(valid.result, { name: "example", count: 2, executionId: "test-execution" });
+		assert.equal(valid.inputSchema.properties.name.type, "string");
+		assert.equal(valid.inputSchema.properties.count.default, 2);
+		assert.equal(valid.inputSchema.additionalProperties, false);
+
+		for (const args of [null, {}, { name: 1 }, { name: "test", extra: true }]) {
+			assert.ok((await run({ action: "tool", args })).error);
+		}
+	});
 	await t.test("shares request validation without widening provider contracts", async () => {
 		const contract = { methods: ["GET", "POST"], pathPrefix: "/api/" };
 		const args = { method: "GET", path: "/api/items", query: { flag: true, count: 2, name: "test" } };

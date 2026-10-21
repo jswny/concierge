@@ -77,7 +77,7 @@ export class MapsConnector extends ObservedConnector<Env> {
 						readOnly: options.method === "GET" || READ_ONLY_POST_PATHS.has(url.pathname),
 						url,
 						method: options.method,
-						headers: { "X-Goog-Api-Key": this.env.GOOGLE_MAPS_API_KEY },
+						authenticate: () => ({ headers: { "X-Goog-Api-Key": this.env.GOOGLE_MAPS_API_KEY }, sensitiveValues: [this.env.GOOGLE_MAPS_API_KEY] }),
 						body: options.body === undefined ? undefined : JSON.stringify(options.body),
 						classifyError: classifyMapsError,
 					});

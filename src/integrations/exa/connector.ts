@@ -67,7 +67,7 @@ export class ExaConnector extends ObservedConnector<Env> {
 						readOnly: options.method === "GET" || (options.method === "POST" && READ_ONLY_POST_PATHS.has(url.pathname)),
 						url,
 						method: options.method,
-						headers: { Authorization: `Bearer ${this.env.EXA_API_KEY}` },
+						authenticate: () => ({ headers: { Authorization: `Bearer ${this.env.EXA_API_KEY}` }, sensitiveValues: [this.env.EXA_API_KEY] }),
 						body: options.body === undefined ? undefined : JSON.stringify(options.body),
 						classifyError: classifyExaError,
 					});

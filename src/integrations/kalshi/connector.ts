@@ -4,7 +4,7 @@ import { Buffer } from "node:buffer";
 import { z } from "zod";
 import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
-import { ConnectorError, ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
+import { ConnectorError, ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload, type RequestAuthentication } from "../../connector-requests";
 import { apiRequestSchema } from "../../connector-inputs";
 import { defineConnectorTool } from "../../connector-tools";
 import { defineConnector } from "../../connector-definition";
@@ -61,14 +61,11 @@ export class KalshiConnector extends ObservedConnector<Env> {
 						throw new Error("Kalshi API-key management endpoints are not exposed.");
 					}
 
-					const sensitiveValues = [this.env.KALSHI_API_KEY_ID, this.env.KALSHI_PRIVATE_KEY].filter(Boolean);
-
 					return this.requests.request({
 						connector: kalshiConnector.label, operation: "request", readOnly: options.method === "GET",
 						url, method: options.method,
-						headers: async () => this.signedHeaders(options.method, url.pathname, sensitiveValues),
+						authenticate: () => this.authenticate(options.method, url.pathname),
 						body: options.body === undefined ? undefined : JSON.stringify(options.body),
-						sensitiveValues,
 						classifyError: classifyKalshiError,
 					});
 				},
@@ -76,20 +73,21 @@ export class KalshiConnector extends ObservedConnector<Env> {
 		};
 	}
 
-	private signedHeaders(method: string, path: string, sensitiveValues: string[]) {
+	private authenticate(method: string, path: string): RequestAuthentication {
 		try {
 			const id = keyIdSchema.parse(this.env.KALSHI_API_KEY_ID);
 			const pem = this.env.KALSHI_PRIVATE_KEY.replaceAll("\\n", "\n").trim();
 			this.key ??= createPrivateKey(pem);
-			sensitiveValues.push(id, pem);
 
 			if (this.key.asymmetricKeyType !== "ed25519") throw new Error();
 			const timestamp = String(Date.now());
 			const message = Buffer.from(timestamp + method + path);
 			const encoded = sign(null, message, this.key).toString("base64");
-			sensitiveValues.push(encoded);
 
-			return { "KALSHI-ACCESS-KEY": id, "KALSHI-ACCESS-TIMESTAMP": timestamp, "KALSHI-ACCESS-SIGNATURE": encoded };
+			return {
+				headers: { "KALSHI-ACCESS-KEY": id, "KALSHI-ACCESS-TIMESTAMP": timestamp, "KALSHI-ACCESS-SIGNATURE": encoded },
+				sensitiveValues: [this.env.KALSHI_API_KEY_ID, this.env.KALSHI_PRIVATE_KEY, id, pem, encoded],
+			};
 		} catch {
 			throw new ConnectorError({ category: "configuration", message: "KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY must contain a valid key ID and an Ed25519 PEM private key." });
 		}

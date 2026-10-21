@@ -3201,6 +3201,26 @@ test("shares bounded reliability behavior across connector operations", async (t
 		const json = await run({ action: "body", format: "json-or-image", closeBody: true, body: '{"native":true}', headers: { "Content-Type": "application/json" } });
 		assert.deepEqual(json.results[0].result, { native: true });
 	});
+	await t.test("pairs refreshed authentication with generic error redaction on every attempt", async () => {
+		const originalFetch = globalThis.fetch;
+		const attempts = [];
+		globalThis.fetch = async (input, init) => {
+			const request = new Request(input, init);
+			const credential = request.headers.get("X-Test-Credential");
+			attempts.push(credential);
+
+			return Response.json({ message: `Failed ${credential}`, code: credential }, { status: 503, headers: { "X-Request-Id": credential } });
+		};
+
+		try {
+			const failed = await run({ action: "request", rotateAuth: true });
+			assert.deepEqual(attempts, ["fixture-secret-1", "fixture-secret-2", "fixture-secret-3"]);
+			assert.match(failed.error, /\[redacted\]/);
+			assert.doesNotMatch(JSON.stringify(failed), /fixture-secret/);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
 	await t.test("HTTP requests include preparation in deadlines and redact credentials", async () => {
 		const originalFetch = globalThis.fetch;
 		let requests = 0;

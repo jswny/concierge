@@ -70,17 +70,24 @@ export type ApiFailure = {
 	outcome?: Outcome;
 };
 
-type ResponseOptions = Pick<HttpRequest, "format" | "sensitive" | "sensitiveValues" | "classifyError">;
-
-type HttpRequest = Operation & {
-	url: URL;
-	method?: HttpMethod;
-	body?: BodyInit | (() => Promise<BodyInit>);
-	headers?: HeadersInit | (() => Promise<HeadersInit>);
+type ResponseOptions = {
 	format?: ResponseFormat;
 	sensitive?: boolean;
 	sensitiveValues?: readonly string[];
 	classifyError?: (status: number, payload: ApiPayload | undefined) => ApiFailure;
+};
+
+export type RequestAuthentication = {
+	headers: HeadersInit;
+	sensitiveValues: readonly string[];
+};
+
+type HttpRequest = Operation & Omit<ResponseOptions, "sensitiveValues"> & {
+	url: URL;
+	method?: HttpMethod;
+	body?: BodyInit | (() => Promise<BodyInit>);
+	headers?: HeadersInit;
+	authenticate?: () => RequestAuthentication | Promise<RequestAuthentication>;
 	onResponse?: (response: Response, headers: Headers) => void;
 };
 
@@ -247,9 +254,10 @@ export class ConnectorRequests {
 
 	request(options: HttpRequest): Promise<ApiPayload> {
 		return this.run(options, async (attempt) => {
-			const headers = new Headers(
-				isRequestFactory(options.headers) ? await options.headers() : options.headers,
-			);
+			const authentication = await options.authenticate?.();
+			const headers = new Headers(options.headers);
+
+			for (const [name, value] of new Headers(authentication?.headers)) headers.set(name, value);
 
 			const body = isRequestFactory(options.body) ? await options.body() : options.body;
 			headers.set("Accept", responseAccept(options.format));
@@ -269,7 +277,7 @@ export class ConnectorRequests {
 
 			options.onResponse?.(response, headers);
 
-			return this.responsePayload(response, attempt, options, headers);
+			return this.responsePayload(response, attempt, { ...options, sensitiveValues: authentication?.sensitiveValues });
 		});
 	}
 
@@ -277,13 +285,12 @@ export class ConnectorRequests {
 		response: Response,
 		attempt: Attempt,
 		options: ResponseOptions = {},
-		headers = new Headers(),
 	): Promise<ApiPayload> {
 		if (response.ok) attempt.succeeded();
 
 		if (response.status === 401 || (!response.ok && options.sensitive)) {
 			await response.body?.cancel();
-			throw this.httpError(response, undefined, options, headers);
+			throw this.httpError(response, undefined, options);
 		}
 
 		let payload: ApiPayload | undefined;
@@ -301,7 +308,7 @@ export class ConnectorRequests {
 			payload = undefined;
 		}
 
-		if (!response.ok) throw this.httpError(response, payload, options, headers);
+		if (!response.ok) throw this.httpError(response, payload, options);
 
 		return payload ?? null;
 	}
@@ -383,8 +390,7 @@ export class ConnectorRequests {
 	httpError(
 		response: Response,
 		payload: ApiPayload | undefined,
-		options: Pick<HttpRequest, "classifyError" | "sensitive" | "sensitiveValues"> = {},
-		headers = new Headers(),
+		options: Omit<ResponseOptions, "format"> = {},
 	): ConnectorError {
 		const status = response.status;
 
@@ -401,12 +407,7 @@ export class ConnectorRequests {
 						? "rate_limited"
 						: "http");
 
-		const secrets = [
-			...(options.sensitiveValues ?? []),
-			headers.get("Authorization")?.replace(/^\S+\s+/, ""),
-			headers.get("X-API-Key"),
-			headers.get("X-Goog-Api-Key"),
-		].filter((value): value is string => !!value);
+		const secrets = options.sensitiveValues ?? [];
 
 		const message =
 			category === "authentication" || category === "permission" || options.sensitive
@@ -541,7 +542,7 @@ export function parseRetryAfter(value: string | null, now = Date.now()): number 
 	return Number.isFinite(timestamp) ? Math.max(0, timestamp - now) : undefined;
 }
 
-function sanitize(value: string | null | undefined, secrets: string[]): string | undefined {
+function sanitize(value: string | null | undefined, secrets: readonly string[]): string | undefined {
 	if (value === undefined || value === null) return undefined;
 	let text = value;
 

@@ -72,7 +72,7 @@ export class UnifiConnector extends ObservedConnector<Env> {
 						url,
 						method: options.method,
 						format: "json-or-image",
-						headers: { "X-API-Key": this.env.UNIFI_API_KEY },
+						authenticate: () => ({ headers: { "X-API-Key": this.env.UNIFI_API_KEY }, sensitiveValues: [this.env.UNIFI_API_KEY] }),
 						body: options.body === undefined ? undefined : JSON.stringify(options.body),
 						classifyError: classifyUnifiError,
 					});

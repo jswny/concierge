@@ -80,7 +80,11 @@ export class GoogleConnector extends ObservedConnector<Env> {
 			readOnly: options.method === "GET",
 			url,
 			method: options.method,
-			headers: async () => ({ Authorization: `Bearer ${await this.auth.accessToken(service.scopes)}` }),
+			authenticate: async () => {
+				const token = await this.auth.accessToken(service.scopes);
+
+				return { headers: { Authorization: `Bearer ${token}` }, sensitiveValues: [token] };
+			},
 			body: options.body === undefined ? undefined : JSON.stringify(options.body),
 			onResponse: (response, headers) => {
 				if (response.status === 401) this.auth.invalidate(headers.get("Authorization")!.slice(7));

@@ -2,12 +2,18 @@ import { z } from "zod";
 import { apiRequestSchema, apiQueryValueSchema, type QueryValue } from "../src/connector-inputs";
 import { defineConnectorTool } from "../src/connector-tools";
 import type { ConnectorId } from "../src/connectors";
+import type { RequestAuthentication } from "../src/connector-requests";
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
 
 type Assert<T extends true> = T;
 
 export type ConnectorIdsAreLiteral = Assert<Equal<ConnectorId, "cloudflare" | "google" | "maps" | "unifi" | "twilio" | "exa" | "kalshi">>;
+
+// @ts-expect-error Authentication must explicitly supply its sensitive values, even if empty.
+const incompleteAuthentication: RequestAuthentication = { headers: { Authorization: "Bearer test" } };
+
+void incompleteAuthentication;
 
 const limitedRequest = apiRequestSchema({ methods: ["GET", "POST"], pathPrefix: "/" });
 

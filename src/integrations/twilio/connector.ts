@@ -80,7 +80,8 @@ export class TwilioConnector extends ObservedConnector<Env> {
 						for (const item of Array.isArray(value) ? value : [value]) body.append(key, String(item));
 					}
 
-					const headers = new Headers({ Authorization: `Basic ${Buffer.from(`${keySid}:${secret}`).toString("base64")}` });
+					const encoded = Buffer.from(`${keySid}:${secret}`).toString("base64");
+					const headers = new Headers();
 
 					if (body) headers.set("Content-Type", "application/x-www-form-urlencoded");
 
@@ -91,8 +92,8 @@ export class TwilioConnector extends ObservedConnector<Env> {
 						url,
 						method: options.method,
 						headers,
+						authenticate: () => ({ headers: { Authorization: `Basic ${encoded}` }, sensitiveValues: [keySid, secret, encoded] }),
 						body,
-						sensitiveValues: [keySid, secret],
 						classifyError: classifyTwilioError,
 					});
 				},

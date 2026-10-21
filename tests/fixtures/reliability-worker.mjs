@@ -70,14 +70,20 @@ export default {
 				});
 
 			if (options.action === "request") {
+				let authentications = 0;
+
 				const result = await runtime.request({
 					...operation,
 					url: new URL("https://reliability.example/api"),
 					method: options.readOnly === false ? "POST" : "GET",
-					headers: async () => {
+					authenticate: async () => {
 						await new Promise((resolve) => setTimeout(resolve, options.prepareMs ?? 0));
+						const secret = options.rotateAuth ? `fixture-secret-${++authentications}` : "fixture-secret";
 
-						return { Authorization: "Bearer fixture-secret" };
+						return {
+							headers: options.rotateAuth ? { "X-Test-Credential": secret } : { Authorization: `Bearer ${secret}` },
+							sensitiveValues: [secret],
+						};
 					},
 					classifyError: (_status, payload) => ({ message: payload?.message, code: payload?.code }),
 					format: options.format,

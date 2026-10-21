@@ -1,7 +1,8 @@
 import { ProtocolError } from "@modelcontextprotocol/server";
 import { CompactEncrypt, compactDecrypt } from "jose";
+import stableStringify from "json-stable-stringify";
 import { parseRetryAfter } from "../connector-requests";
-import { isJsonObject, type JsonObject, type JsonValue } from "../json";
+import type { JsonObject } from "../json";
 import {
 	verifyCallback, webhookHeaders, publicCallbackFetch,
 	type EventOwner, type EventSource, type SubscribeParams, type UnsubscribeParams,
@@ -71,7 +72,9 @@ export class McpEvents {
 		try { filters = source.parseArguments(params.arguments); }
 		catch { throw new ProtocolError(-32602, "Invalid event filters."); }
 
-		const args = canonicalJson(filters);
+		const args = stableStringify(filters);
+
+		if (args === undefined) throw new Error("Event filters could not be serialized.");
 		const principal = JSON.stringify({ userId: owner.userId, clientId: owner.clientId, grantId: owner.grantId });
 		const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([principal, params.delivery.url, params.name, args])));
 
@@ -267,15 +270,4 @@ export class McpEvents {
 		if (row.time === null) await this.ctx.storage.deleteAlarm();
 		else await this.ctx.storage.setAlarm(Math.max(Date.now() + 100, row.time));
 	}
-}
-
-function canonicalJson(value: JsonValue | undefined): string {
-	if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-
-	if (isJsonObject(value)) {
-		return `{${Object.entries(value).filter(([, item]) => item !== undefined).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
-			.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
-	}
-
-	return JSON.stringify(value);
 }

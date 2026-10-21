@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createTestHarness } from "wrangler";
@@ -370,6 +370,38 @@ test("callback redirects are rejected without sending a verification to another 
 		const result = await rpc("events/subscribe", params("https://receiver.example.com/redirect"));
 		assert.equal(result.error.code, -32015);
 		assert.deepEqual(visited, ["https://receiver.example.com/redirect"]);
+	} finally { globalThis.fetch = original; }
+});
+
+test("subscription serialization preserves existing identities across renewal and removal", async () => {
+	const original = globalThis.fetch;
+	globalThis.fetch = async (input, init) => Response.json({ challenge: JSON.parse(await new Request(input, init).text()).challenge });
+
+	const cases = [
+		{ filters: {}, serialized: "{}" },
+		{ filters: { To: TO }, serialized: '{"To":"+12025550101"}' },
+		{ filters: { From: FROM }, serialized: '{"From":"+12025550102"}' },
+		{ filters: { To: TO, From: FROM }, serialized: '{"From":"+12025550102","To":"+12025550101"}' },
+	];
+
+	try {
+		for (const [index, { filters, serialized }] of cases.entries()) {
+			const instance = `stable-identity-${index}`;
+			const subscription = params(`https://receiver.example.com/${instance}`, secret(), filters);
+			const principal = JSON.stringify({ userId: "owner", clientId: "client", grantId: "grant" });
+			const expectedId = `sub_${createHash("sha256").update(JSON.stringify([principal, subscription.delivery.url, subscription.name, serialized])).digest("hex")}`;
+			const created = await fixture(instance, { action: "subscribe", params: subscription });
+			assert.equal(created.id, expectedId);
+			const reordered = { ...subscription, arguments: Object.fromEntries(Object.entries(filters).reverse()) };
+			const renewed = await fixture(instance, { action: "subscribe", params: reordered });
+			assert.equal(renewed.id, expectedId);
+			const state = await fixture(instance, { action: "state" });
+			assert.equal(state.subscriptions.length, 1);
+			assert.equal(state.subscriptions[0].arguments, serialized);
+			const { secret: _, ...delivery } = subscription.delivery;
+			assert.deepEqual(await fixture(instance, { action: "unsubscribe", params: { ...reordered, delivery } }), {});
+			assert.equal((await fixture(instance, { action: "state" })).subscriptions.length, 0);
+		}
 	} finally { globalThis.fetch = original; }
 });
 

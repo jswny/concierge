@@ -1,11 +1,25 @@
 import { importPKCS8, SignJWT } from "jose";
-import { ConnectorError, ConnectorRequests, isRecord } from "../../connector-requests";
+import { ConnectorError, ConnectorRequests } from "../../connector-requests";
+import { z } from "zod";
+import { parseJson } from "../../json";
 
 const SERVICE_ACCOUNT = "concierge@j1-concierge.iam.gserviceaccount.com";
 const WORKSPACE_USER = "joe@j1.io";
 const TOKEN_LEEWAY_MS = 60_000;
 
 type AccessToken = { value: string; expiresAt: number };
+
+const credentialsSchema = z.object({
+	type: z.literal("service_account"),
+	client_email: z.literal(SERVICE_ACCOUNT),
+	private_key: z.string(),
+	private_key_id: z.string().min(1),
+});
+
+const tokenSchema = z.object({
+	access_token: z.string().min(1),
+	expires_in: z.number().gt(TOKEN_LEEWAY_MS / 1000),
+});
 
 export class GoogleWorkspaceAuth {
 	#tokens = new Map<string, AccessToken>();
@@ -72,38 +86,20 @@ export class GoogleWorkspaceAuth {
 			},
 		});
 
-		if (!isRecord(delegated)) throw new ConnectorError({ category: "invalid_response", message: "Google Workspace token exchange returned an invalid response." });
+		const token = tokenSchema.safeParse(delegated);
 
-		return readAccessToken(delegated, "Workspace token exchange", startedAt);
+		if (!token.success) throw new ConnectorError({ category: "invalid_response", message: "Google Workspace token exchange returned an invalid access token." });
+
+		return { value: token.data.access_token, expiresAt: startedAt + Math.min(token.data.expires_in, 3600) * 1000 };
 	}
 }
 
 async function readCredentials(value: string) {
 	try {
-		const data = JSON.parse(value);
-
-		if (
-			data?.type !== "service_account" || data.client_email !== SERVICE_ACCOUNT ||
-			typeof data.private_key !== "string" || typeof data.private_key_id !== "string" || !data.private_key_id
-		) throw new Error("Invalid service-account key.");
+		const data = credentialsSchema.parse(parseJson(value));
 
 		return { key: await importPKCS8(data.private_key, "RS256"), kid: data.private_key_id };
 	} catch {
 		throw new ConnectorError({ category: "configuration", message: "GOOGLE_SERVICE_ACCOUNT_JSON must contain a valid key for the Concierge service account." });
 	}
-}
-
-function readAccessToken(data: Record<string, unknown>, stage: string, startedAt = Date.now()): AccessToken {
-	if (
-		typeof data.access_token !== "string" || !data.access_token ||
-		typeof data.expires_in !== "number" || !Number.isFinite(data.expires_in) ||
-		data.expires_in <= TOKEN_LEEWAY_MS / 1000
-	) {
-		throw new ConnectorError({ category: "invalid_response", message: `Google ${stage} returned an invalid access token.` });
-	}
-
-	return {
-		value: data.access_token,
-		expiresAt: startedAt + Math.min(data.expires_in, 3600) * 1000,
-	};
 }

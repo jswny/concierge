@@ -3,7 +3,7 @@ import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
 import { z } from "zod";
 import { GoogleWorkspaceAuth } from "./auth";
-import { ConnectorRequests, createApiUrl, isRecord, type ApiFailure } from "../../connector-requests";
+import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
 import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../connector-inputs";
 
 const SERVICES = {
@@ -83,14 +83,21 @@ export class GoogleConnector extends ObservedConnector<Env> {
 	}
 }
 
-function classifyGoogleError(status: number, payload: unknown): ApiFailure {
-	const error = isRecord(payload) && isRecord(payload.error) ? payload.error : {};
-	const reasons = Array.isArray(error.errors) ? error.errors.filter(isRecord).map((entry) => entry.reason) : [];
+const errorSchema = z.object({
+	error: z.object({
+		message: z.string().optional().catch(undefined),
+		errors: z.array(z.object({ reason: z.string().optional().catch(undefined) }).nullable().catch(null)).optional().catch(undefined),
+	}).optional().catch(undefined),
+});
+
+function classifyGoogleError(status: number, payload: ApiPayload | undefined): ApiFailure {
+	const error = errorSchema.safeParse(payload).data?.error;
+	const reasons = error?.errors?.flatMap((entry) => entry ? [entry.reason] : []) ?? [];
 	const rateLimited = status === 429 || (status === 403 && reasons.some((reason) => reason === "rateLimitExceeded" || reason === "userRateLimitExceeded"));
 
 	const failure: ApiFailure = {
-		message: typeof error.message === "string" ? error.message : undefined,
-		code: typeof reasons[0] === "string" ? reasons[0] : undefined,
+		message: error?.message,
+		code: reasons[0],
 	};
 
 	if (rateLimited) {

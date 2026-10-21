@@ -1,7 +1,8 @@
 import type { ConnectorTools } from "@cloudflare/codemode";
+import { z } from "zod";
 import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
-import { ConnectorRequests, createApiUrl, isRecord, type ApiFailure } from "../../connector-requests";
+import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
 import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../connector-inputs";
 import { ConnectorImages, isConnectorImage } from "../../connector-images";
 import { RESPONSE_TYPES } from "../../response-formats";
@@ -81,13 +82,19 @@ export class UnifiConnector extends ObservedConnector<Env> {
 	}
 }
 
-function classifyUnifiError(status: number, payload: unknown): ApiFailure {
-	const error = isRecord(payload) ? payload : {};
+const errorSchema = z.object({
+	message: z.string().optional().catch(undefined),
+	code: z.string().optional().catch(undefined),
+	traceId: z.string().optional().catch(undefined),
+});
+
+function classifyUnifiError(status: number, payload: ApiPayload | undefined): ApiFailure {
+	const error = errorSchema.safeParse(payload).data;
 
 	const failure: ApiFailure = {
-		message: typeof error.message === "string" ? error.message : undefined,
-		code: typeof error.code === "string" ? error.code : undefined,
-		requestId: typeof error.traceId === "string" ? error.traceId : undefined,
+		message: error?.message,
+		code: error?.code,
+		requestId: error?.traceId,
 	};
 
 	// A proxy timeout does not prove that the console rejected a mutation.

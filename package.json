@@ -9,7 +9,7 @@
     "dev": "vite",
     "start": "npm run dev",
     "preview": "vite preview",
-    "test": "node --test tests/worker.test.mjs tests/events.test.mjs",
+    "test": "node --test tests/json.test.mjs tests/worker.test.mjs tests/events.test.mjs",
     "test:build": "node --test tests/build.test.mjs",
     "test:lint": "node --test tools/oxlint/anti-slop/rules/*.test.ts",
     "cf-typegen": "wrangler types --config wrangler.jsonc",

@@ -2,7 +2,7 @@ import type { ConnectorTools } from "@cloudflare/codemode";
 import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
 import { z } from "zod";
-import { ConnectorRequests, createApiUrl, isRecord, type ApiFailure } from "../../connector-requests";
+import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
 import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../connector-inputs";
 
 const PLACES_ORIGIN = "https://places.googleapis.com";
@@ -82,11 +82,18 @@ export class MapsConnector extends ObservedConnector<Env> {
 	}
 }
 
-function classifyMapsError(_status: number, payload: unknown): ApiFailure {
-	const error = isRecord(payload) && isRecord(payload.error) ? payload.error : {};
+const errorSchema = z.object({
+	error: z.object({
+		message: z.string().optional().catch(undefined),
+		status: z.string().optional().catch(undefined),
+	}).optional().catch(undefined),
+});
+
+function classifyMapsError(_status: number, payload: ApiPayload | undefined): ApiFailure {
+	const error = errorSchema.safeParse(payload).data?.error;
 
 	return {
-		message: typeof error.message === "string" ? error.message : undefined,
-		code: typeof error.status === "string" ? error.status : undefined,
+		message: error?.message,
+		code: error?.status,
 	};
 }

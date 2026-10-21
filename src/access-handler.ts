@@ -7,6 +7,7 @@ import {
 	type OAuthHelpers,
 } from "@cloudflare/workers-oauth-provider";
 import { renderConsentPage } from "./consent-page";
+import { z } from "zod";
 
 type EnvWithOauth = Env & { OAUTH_PROVIDER: OAuthHelpers };
 
@@ -52,14 +53,14 @@ async function handleAccessRoute(request: Request, env: EnvWithOauth) {
 
 	if (request.method === "POST" && pathname === "/authorize") {
 		const form = await request.formData();
-		const handle = form.get("handle");
+		const handle = z.string().safeParse(form.get("handle"));
 
-		if (typeof handle !== "string") {
+		if (!handle.success) {
 			return new Response("Missing consent handle", { status: 400 });
 		}
 
 		if (form.get("decision") === "deny") {
-			const denied = await oauth.denyConsent(request, handle);
+			const denied = await oauth.denyConsent(request, handle.data);
 
 			return new Response(null, { status: 302, headers: denied.headers });
 		}
@@ -68,7 +69,7 @@ async function handleAccessRoute(request: Request, env: EnvWithOauth) {
 			return new Response("Invalid consent decision", { status: 400 });
 		}
 
-		const approved = await oauth.approveConsent(request, handle, { remember });
+		const approved = await oauth.approveConsent(request, handle.data, { remember });
 
 		return redirectToAccess(request, env, approved.request, approved.headers);
 	}
@@ -182,24 +183,24 @@ async function authenticateWithAccess(request: Request, env: Env, codeVerifier: 
 	});
 
 	await oidc.validateApplicationLevelSignature(server, response, { signal });
-	const payload = oidc.getValidatedIdTokenClaims(tokens)!;
 
 	// Concierge accepts only its own audience, even when OIDC would allow additional audiences.
-	if (
-		typeof payload.sub !== "string" || !payload.sub ||
-		!Number.isFinite(payload.exp) || !Number.isFinite(payload.iat) ||
-		(Array.isArray(payload.aud) && payload.aud.some((audience) => audience !== env.ACCESS_CLIENT_ID)) ||
-		(payload.azp !== undefined && payload.azp !== env.ACCESS_CLIENT_ID)
-	) {
-		throw new Error("Invalid Access identity claims.");
-	}
+	const payload = z.object({
+		sub: z.string().min(1),
+		exp: z.number(),
+		iat: z.number(),
+		aud: z.union([z.literal(env.ACCESS_CLIENT_ID), z.array(z.literal(env.ACCESS_CLIENT_ID))]),
+		azp: z.literal(env.ACCESS_CLIENT_ID).optional(),
+		name: z.string().optional().catch(undefined),
+		email: z.string().optional().catch(undefined),
+	}).parse(oidc.getValidatedIdTokenClaims(tokens));
 
 	return {
 		tokens,
 		user: {
 			sub: payload.sub,
-			name: typeof payload.name === "string" ? payload.name : payload.sub,
-			email: typeof payload.email === "string" ? payload.email : undefined,
+			name: payload.name ?? payload.sub,
+			email: payload.email,
 		},
 	};
 }

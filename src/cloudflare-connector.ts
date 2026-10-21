@@ -2,7 +2,7 @@ import type { ConnectorTools } from "@cloudflare/codemode";
 import { ObservedConnector } from "./observed-connector";
 import { UsageLog } from "./usage-logging";
 import { z } from "zod";
-import { ConnectorError, ConnectorRequests, isRecord, type ApiFailure } from "./connector-requests";
+import { ConnectorError, ConnectorRequests, type ApiFailure, type ApiPayload } from "./connector-requests";
 import { toToolInputSchema } from "./connector-inputs";
 
 const markdownSchema = z.strictObject({
@@ -22,6 +22,18 @@ const markdownSchema = z.strictObject({
 });
 
 const markdownInputSchema = toToolInputSchema(markdownSchema);
+
+const browserResponseSchema = z.object({
+	success: z.literal(true),
+	result: z.string(),
+	meta: z.object({
+		status: z.number().int().min(100).max(599).optional().catch(undefined),
+		title: z.string().optional().catch(undefined),
+		finalUrl: z.string().optional().catch(undefined),
+	}).optional().catch(undefined),
+});
+
+const browserFailureSchema = z.object({ success: z.literal(false) });
 
 const markdownOutputSchema = toToolInputSchema(z.strictObject({
 	requestedUrl: z.string(),
@@ -82,16 +94,18 @@ export class CloudflareConnector extends ObservedConnector<Env> {
 						if (waitForSelector) browserOptions.waitForSelector = { selector: waitForSelector.selector, visible: true, timeout: selectorTimeout };
 						attempt.dispatch();
 						const response = await this.env.BROWSER.quickAction("markdown", browserOptions);
-						const payload = await this.requests.responsePayload(response, attempt, { classifyError: classifyBrowserError });
+						const rawPayload = await this.requests.responsePayload(response, attempt, { classifyError: classifyBrowserError });
 
-						if (isRecord(payload) && payload.success === false) throw this.requests.httpError(response, payload, { classifyError: classifyBrowserError });
+						if (browserFailureSchema.safeParse(rawPayload).success) throw this.requests.httpError(response, rawPayload, { classifyError: classifyBrowserError });
+						const parsed = browserResponseSchema.safeParse(rawPayload);
 
-						if (!isRecord(payload) || payload.success !== true || typeof payload.result !== "string") throw new ConnectorError({ category: "invalid_response", message: "Browser Run returned an invalid Markdown response." });
-						const meta = isRecord(payload.meta) ? payload.meta : {};
-						const status = typeof meta.status === "number" && Number.isInteger(meta.status) && meta.status >= 100 && meta.status <= 599 ? meta.status : null;
+						if (!parsed.success) throw new ConnectorError({ category: "invalid_response", message: "Browser Run returned an invalid Markdown response." });
+						const payload = parsed.data;
+						const meta = payload.meta;
+						const status = meta?.status ?? null;
 
 						if (status !== null && status >= 400) throw new ConnectorError({ category: "http", status, message: `The webpage origin returned HTTP ${status}; its content was not retrieved.` });
-						const title = typeof meta.title === "string" ? meta.title.slice(0, 1_000) : null;
+						const title = meta?.title?.slice(0, 1_000) ?? null;
 
 						if (!payload.result.trim()) throw new ConnectorError({ category: "invalid_response", message: "The rendered webpage contains no readable Markdown. It may need a loading selector or authentication." });
 
@@ -110,7 +124,7 @@ export class CloudflareConnector extends ObservedConnector<Env> {
 
 						const page = {
 							requestedUrl: parsedUrl.toString(),
-							finalUrl: typeof meta.finalUrl === "string" ? meta.finalUrl.slice(0, 4_000) : null,
+							finalUrl: meta?.finalUrl?.slice(0, 4_000) ?? null,
 							title,
 							status,
 							retrievedAt: new Date().toISOString(),
@@ -153,11 +167,18 @@ function isBlockedPage(title: string | null, markdown: string) {
 	return /^(?:#\s*)?(?:checking your browser|verify (?:that )?you are human|enable javascript and cookies to continue|please (?:sign|log) in to continue)\b/i.test(markdown.trimStart());
 }
 
-function classifyBrowserError(_status: number, payload: unknown): ApiFailure {
-	const error = isRecord(payload) && Array.isArray(payload.errors) && isRecord(payload.errors[0]) ? payload.errors[0] : {};
+const errorSchema = z.object({
+	errors: z.array(z.object({
+		message: z.string().optional().catch(undefined),
+		code: z.number().optional().catch(undefined),
+	}).nullable().catch(null)).optional().catch(undefined),
+});
+
+function classifyBrowserError(_status: number, payload: ApiPayload | undefined): ApiFailure {
+	const error = errorSchema.safeParse(payload).data?.errors?.[0];
 
 	return {
-		message: typeof error.message === "string" ? error.message : undefined,
-		code: typeof error.code === "number" ? String(error.code) : undefined,
+		message: error?.message,
+		code: error?.code === undefined ? undefined : String(error.code),
 	};
 }

@@ -9,6 +9,7 @@ import { DurableObject } from "cloudflare:workers";
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
+import { parseJson, type JsonValue } from "./json";
 import { Buffer } from "node:buffer";
 import { handleAccessRequest } from "./access-handler";
 import { CloudflareConnector } from "./cloudflare-connector";
@@ -39,7 +40,7 @@ type ImageContent = { type: "image"; mimeType: string; data: string };
 type CodeToolResult = {
 	content: Array<{ text: string; type: "text" } | ImageContent>;
 	isError?: boolean;
-	structuredContent?: Record<string, unknown>;
+	structuredContent?: { result: JsonValue };
 };
 
 const MCP_ALLOWED_HOSTNAMES = ["concierge.j1.io", "localhost", "127.0.0.1", "[::1]"];
@@ -211,7 +212,8 @@ function formatCodeToolOutput(output: ProxyToolOutput, imageStore: ConnectorImag
 	if (output.status === "completed") {
 		try {
 			const { result, images } = prepareImageOutput(output.result, output.executionId, imageStore);
-			const bounded = truncateResult(result);
+			// SAFETY: Upstream truncation only clips the JSON-normalized value and inserts JSON-compatible omission markers.
+			const bounded = truncateResult(result) as JsonValue | undefined;
 
 			return {
 				content: [{ text: stringifyToolResult(bounded), type: "text" }, ...images],
@@ -243,11 +245,13 @@ function formatCodeToolOutput(output: ProxyToolOutput, imageStore: ConnectorImag
 	};
 }
 
+// oxlint-disable-next-line anti-slop/no-unknown-parameters -- Sandbox results intentionally remain opaque until this JSON serialization boundary resolves images and rejects unsupported values.
 function prepareImageOutput(value: unknown, executionId: string, imageStore: ConnectorImages) {
 	const images: ImageContent[] = [];
 	let totalBytes = 0;
 
 	// Extract before upstream text truncation so binary data is neither clipped nor duplicated in JSON.
+	// oxlint-disable-next-line anti-slop/no-unknown-parameters -- Native JSON.stringify invokes this replacer on arbitrary sandbox values, before the result has a JSON contract.
 	const json = JSON.stringify(value, (_key, nested: unknown) => {
 		if (!isImageReference(nested)) return nested;
 		const image = imageStore.resolve(executionId, nested);
@@ -262,14 +266,16 @@ function prepareImageOutput(value: unknown, executionId: string, imageStore: Con
 		return { type: "image", mimeType: image.mimeType, byteLength: image.data.byteLength, contentIndex: images.length };
 	});
 
-	const result: unknown = json === undefined ? undefined : JSON.parse(json);
+	const result = json === undefined ? undefined : parseJson(json);
 
 	return { result, images };
 }
 
-function stringifyToolResult(result: unknown) {
-	if (typeof result === "string") {
-		return result;
+function stringifyToolResult(result: JsonValue | undefined) {
+	const text = z.string().safeParse(result);
+
+	if (text.success) {
+		return text.data;
 	}
 
 	if (result === undefined) {
@@ -283,7 +289,7 @@ function stringifyToolResult(result: unknown) {
 	}
 }
 
-function normalizeStructuredResult(result: unknown) {
+function normalizeStructuredResult(result: JsonValue | undefined) {
 	return result === undefined ? null : result;
 }
 
@@ -328,7 +334,7 @@ export class ConciergeMcpRuntime extends DurableObject<DebugEnv> {
 			}
 
 			const bearer = /^Bearer ([^\s]+)$/i.exec(request.headers.get("Authorization") ?? "")?.[1];
-			const token = bearer ? await getOAuthApi(oauthOptions, this.env).unwrapToken<Record<string, unknown>>(bearer) : null;
+			const token = bearer ? await getOAuthApi(oauthOptions, this.env).unwrapToken<{ accessToken: string; email?: string; login: string; name: string }>(bearer) : null;
 
 			if (!token || ![token.audience].flat().includes("https://concierge.j1.io/mcp")) throw new Error("Authentication required.");
 

@@ -7,6 +7,7 @@ import {
 	StreamableHTTPClientTransport,
 } from "@modelcontextprotocol/client";
 import { createTestHarness } from "wrangler";
+import { z } from "zod";
 import { JPEG_BASE64 } from "./fixtures/jpeg.mjs";
 
 const JPEG = Buffer.from(JPEG_BASE64, "base64");
@@ -381,8 +382,7 @@ async function testCimdAuthorization(authMethod) {
 
 		assert.equal(exchange.status, 200);
 		const tokens = await exchange.json();
-		assert.equal(typeof tokens.access_token, "string");
-		assert.equal(typeof tokens.refresh_token, "string");
+		assert.doesNotThrow(() => z.object({ access_token: z.string(), refresh_token: z.string() }).parse(tokens));
 
 		if (signedClient) {
 			const replay = await worker.fetch(tokenEndpoint, {
@@ -998,9 +998,7 @@ test("records correlated operational metadata without source, results or excepti
 	});
 
 	const events = await waitFor(() => {
-		const events = debugServer.getLogs().flatMap((log) => log.message ?? [])
-			.filter((message) => typeof message === "string" && message.startsWith('{"event":"code_execution"'))
-			.map((message) => JSON.parse(message));
+		const events = usageEvents(debugServer, '{"event":"code_execution"');
 
 		return events.length >= 4 ? events : undefined;
 	}, "Code Mode execution telemetry");
@@ -1013,12 +1011,12 @@ test("records correlated operational metadata without source, results or excepti
 	assert.equal(new Set(events.map((event) => event.invocationId)).size, 4);
 
 	for (const event of events) {
-		assert.equal(typeof event.executionId, "string");
+		assert.doesNotThrow(() => z.string().parse(event.executionId));
 		assert.ok(Number.isFinite(event.durationMs) && event.durationMs >= 0);
 		assert.deepEqual(Object.keys(event).sort(), ["event", "invocationId", "executionId", "durationMs", "status", "mcpStatus", "connectorCalls"].sort());
 	}
 
-	const usage = logs.flatMap((log) => log.message ?? []).filter((message) => typeof message === "string" && message.startsWith('{"event":"code_')).map((message) => JSON.parse(message));
+	const usage = usageEvents(debugServer);
 	assert.equal(usage.length, 5);
 	assert.doesNotMatch(JSON.stringify(usage), /private returned content|private exception content|private_source_marker|example\.com|networkidle2/);
 	const connector = usage.find((event) => event.event === "code_connector_call");
@@ -1188,9 +1186,7 @@ test("keeps usage correlation isolated across concurrent MCP invocations", async
 		});
 
 		const events = await waitFor(() => {
-			const events = debugServer.getLogs().flatMap((log) => log.message ?? [])
-				.filter((message) => typeof message === "string" && message.startsWith('{"event":"code_'))
-				.map((message) => JSON.parse(message));
+			const events = usageEvents(debugServer);
 
 			return events.filter((event) => event.event === "code_execution").length === 2 ? events : undefined;
 		}, "concurrent usage summaries");
@@ -1224,9 +1220,7 @@ test("omits credentials and personal data from real MCP operational logs", async
 	});
 
 	const events = await waitFor(() => {
-		const events = debugServer.getLogs().flatMap((log) => log.message ?? [])
-			.filter((message) => typeof message === "string" && message.startsWith('{"event":"code_'))
-			.map((message) => JSON.parse(message));
+		const events = usageEvents(debugServer);
 
 		return events.some((event) => event.event === "code_execution") ? events : undefined;
 	}, "metadata-only usage logs");
@@ -2512,6 +2506,52 @@ test("Maps fails clearly when its API key is missing", async () => {
 	} finally { await harness.close(); }
 });
 
+test("schema-parsed error metadata preserves HTTP failures and valid sibling fields", async () => {
+	const originalFetch = globalThis.fetch;
+	const harness = createConciergeHarness(true);
+
+	const cases = [
+		{ code: "async () => await twilio.request({ method: 'POST', path: '/2010-04-01/Accounts/{AccountSid}/Messages.json', body: {} })",
+			status: 400, payload: { message: { private: "private-metadata" }, code: 21614 }, expected: /code=21614/ },
+		{ code: "async () => await unifi.request({ method: 'POST', path: '/v1/hosts', body: {} })",
+			status: 400, payload: { message: ["private-metadata"], code: "native-unifi-code", traceId: {} }, expected: /code=native-unifi-code/ },
+		{ code: "async () => await maps.request({ service: 'places', method: 'POST', path: '/v1/places:searchText', body: {} })",
+			status: 400, payload: { error: { message: 12, status: "INVALID_ARGUMENT", future: "private-metadata" } }, expected: /code=INVALID_ARGUMENT/ },
+		{ code: "async () => await exa.request({ method: 'POST', path: '/agent/runs', body: {} })",
+			status: 400, payload: { error: { message: ["private-metadata"], code: "native-exa-code" }, tag: 12, requestId: [] }, expected: /code=native-exa-code/ },
+		{ code: "async () => await google.request({ service: 'gmail', method: 'POST', path: '/gmail/v1/users/me/messages/send', body: {} })",
+			status: 403, payload: { error: { message: false, errors: [false, { reason: 12 }, { reason: "rateLimitExceeded" }] } }, expected: /rate_limited/ },
+	];
+
+	let current;
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		const url = new URL(new Request(input, init).url);
+
+		if (url.hostname === "oauth2.googleapis.com") return Response.json({ access_token: "test-error-metadata-token", expires_in: 3600 });
+
+		if (!["api.twilio.com", "api.ui.com", "places.googleapis.com", "api.exa.ai", "gmail.googleapis.com"].includes(url.hostname)) return originalFetch(input, init);
+		calls++;
+
+		return Response.json(current.payload, { status: current.status });
+	};
+
+	try {
+		await harness.listen();
+		await withMcpClient(undefined, async (client) => {
+			for (current of cases) {
+				calls = 0;
+				const result = await client.callTool({ name: "code", arguments: { code: current.code } });
+				assert.equal(result.isError, true);
+				assert.equal(calls, 1);
+				assert.match(result.content[0].text, new RegExp(`HTTP ${current.status}`));
+				assert.match(result.content[0].text, current.expected);
+				assert.doesNotMatch(JSON.stringify(result), /private-metadata|test-error-metadata-token|invalid_response|ZodError/);
+			}
+		}, harness);
+	} finally { globalThis.fetch = originalFetch; await harness.close(); }
+});
+
 test("calls Google Workspace through signed JWTs, fixed delegation, and a private token cache", async (t) => {
 	const originalFetch = globalThis.fetch;
 	const requests = [];
@@ -3139,6 +3179,14 @@ async function withMcpClient(options, run, server = debugServer) {
 	} finally {
 		await client.close();
 	}
+}
+
+function usageEvents(server, prefix = '{"event":"code_') {
+	return server.getLogs().flatMap((log) => log.message ?? []).flatMap((message) => {
+		const line = z.string().safeParse(message);
+
+		return line.success && line.data.startsWith(prefix) ? [JSON.parse(line.data)] : [];
+	});
 }
 
 async function waitFor(check, description) {

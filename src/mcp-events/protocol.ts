@@ -2,15 +2,17 @@ import { ProtocolError, type McpServer } from "@modelcontextprotocol/server";
 import { Webhook } from "standardwebhooks";
 import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
+import { parseJson, type JsonObject } from "../json";
 
 export interface EventSource {
-	definition: { name: string; description: string; delivery: string[]; inputSchema: Record<string, unknown>; payloadSchema: Record<string, unknown> };
-	parseArguments(value: unknown): Record<string, unknown>;
-	matches(args: Record<string, unknown>, data: Record<string, unknown>): boolean;
+	definition: { name: string; description: string; delivery: string[]; inputSchema: z.core.JSONSchema.JSONSchema; payloadSchema: z.core.JSONSchema.JSONSchema };
+	// oxlint-disable-next-line anti-slop/no-unknown-parameters -- Each provider implements this boundary parser with its argument schema before filters are stored or matched.
+	parseArguments(value: unknown): JsonObject;
+	matches(args: JsonObject, data: JsonObject): boolean;
 }
 
 // Match Cloudflare's reference: ChatGPT event descriptors reject $schema.
-export function eventDescriptorSchema(schema: z.ZodType): Record<string, unknown> {
+export function eventDescriptorSchema(schema: z.ZodType): z.core.JSONSchema.JSONSchema {
 	const { $schema: _dialect, ...descriptor } = z.toJSONSchema(schema, { target: "draft-7" });
 
 	return descriptor;
@@ -71,12 +73,12 @@ export interface EventOwner {
 }
 
 export interface EventMethods {
-	subscribe(params: SubscribeParams, owner: EventOwner): Promise<Record<string, unknown>>;
-	unsubscribe(params: UnsubscribeParams, owner: EventOwner): Promise<Record<string, unknown>>;
+	subscribe(params: SubscribeParams, owner: EventOwner): Promise<{ id: string; refreshBefore: string; cursor: null; truncated: boolean }>;
+	unsubscribe(params: UnsubscribeParams, owner: EventOwner): Promise<Record<string, never>>;
 }
 
 export function registerEventMethods(server: McpServer, sources: readonly EventSource[], service: EventMethods, owner: () => Promise<EventOwner>) {
-	async function operation(run: () => Promise<Record<string, unknown>>) {
+	async function operation<T extends JsonObject>(run: () => Promise<T>) {
 		try { return await run(); }
 		catch (error) {
 			if (error instanceof ProtocolError) throw error;
@@ -164,11 +166,8 @@ export async function verifyCallback(id: string, url: string, secret: string): P
 			throw new Error();
 		}
 
-		const result: unknown = JSON.parse(new TextDecoder().decode(await readBoundedBody(response, 4096)));
-		const returned = typeof result === "object" && result !== null && "challenge" in result ? result.challenge : undefined;
-
-		if (typeof returned !== "string") throw new Error();
-		const received = Buffer.from(returned);
+		const result = z.object({ challenge: z.string() }).parse(parseJson(new TextDecoder().decode(await readBoundedBody(response, 4096))));
+		const received = Buffer.from(result.challenge);
 		const expected = Buffer.from(challenge);
 
 		if (received.length !== expected.length || !timingSafeEqual(received, expected)) throw new Error();

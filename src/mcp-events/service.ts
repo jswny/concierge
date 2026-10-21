@@ -1,6 +1,7 @@
 import { ProtocolError } from "@modelcontextprotocol/server";
 import { CompactEncrypt, compactDecrypt } from "jose";
 import { parseRetryAfter } from "../connector-requests";
+import { isJsonObject, type JsonObject, type JsonValue } from "../json";
 import {
 	verifyCallback, webhookHeaders, publicCallbackFetch,
 	type EventOwner, type EventSource, type SubscribeParams, type UnsubscribeParams,
@@ -65,7 +66,7 @@ export class McpEvents {
 		const source = this.sources.find((source) => source.definition.name === params.name);
 
 		if (!source) throw new ProtocolError(-32011, "NotFound", { kind: "event" });
-		let filters: Record<string, unknown>;
+		let filters: JsonObject;
 
 		try { filters = source.parseArguments(params.arguments); }
 		catch { throw new ProtocolError(-32602, "Invalid event filters."); }
@@ -130,7 +131,7 @@ export class McpEvents {
 		});
 	}
 
-	async publish(name: string, sourceId: string, data: Record<string, unknown>): Promise<void> {
+	async publish(name: string, sourceId: string, data: JsonObject): Promise<void> {
 		this.cleanup();
 		const source = this.sources.find((source) => source.definition.name === name);
 
@@ -268,10 +269,10 @@ export class McpEvents {
 	}
 }
 
-function canonicalJson(value: unknown): string {
+function canonicalJson(value: JsonValue | undefined): string {
 	if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
 
-	if (value !== null && typeof value === "object") {
+	if (isJsonObject(value)) {
 		return `{${Object.entries(value).filter(([, item]) => item !== undefined).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
 			.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
 	}

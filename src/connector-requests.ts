@@ -1,9 +1,14 @@
 import type { ConnectorImage } from "./connector-images";
+import { z } from "zod";
+import { apiScalarSchema } from "./connector-inputs";
+import { parseJson, type JsonValue } from "./json";
 import {
 	RESPONSE_TYPES, parseMediaType, responseAccept, responseTypeFor, supportedResponseTypes, type ResponseFormat,
 } from "./response-formats";
 
 export type QueryValue = boolean | number | string | Array<boolean | number | string>;
+
+export type ApiPayload = JsonValue | ConnectorImage;
 
 type ErrorCategory =
 	| "authentication"
@@ -75,7 +80,7 @@ type HttpRequest = Operation & {
 	format?: ResponseFormat;
 	sensitive?: boolean;
 	sensitiveValues?: readonly string[];
-	classifyError?: (status: number, payload: unknown) => ApiFailure;
+	classifyError?: (status: number, payload: ApiPayload | undefined) => ApiFailure;
 	onResponse?: (response: Response, headers: Headers) => void;
 };
 
@@ -96,6 +101,8 @@ const DEFAULTS: Limits = {
 	maxResponseBytes: 4 * 1024 * 1024,
 	backoffMs: 250,
 };
+
+const requestFactorySchema = z.function();
 
 /** One instance per Concierge Durable Object; coordinates all calls to each provider. */
 export class ConnectorRequests {
@@ -238,13 +245,13 @@ export class ConnectorRequests {
 		}
 	}
 
-	request(options: HttpRequest): Promise<unknown> {
+	request(options: HttpRequest): Promise<ApiPayload> {
 		return this.run(options, async (attempt) => {
 			const headers = new Headers(
-				typeof options.headers === "function" ? await options.headers() : options.headers,
+				isRequestFactory(options.headers) ? await options.headers() : options.headers,
 			);
 
-			const body = typeof options.body === "function" ? await options.body() : options.body;
+			const body = isRequestFactory(options.body) ? await options.body() : options.body;
 			headers.set("Accept", responseAccept(options.format));
 
 			if (options.body !== undefined && !headers.has("Content-Type"))
@@ -271,7 +278,7 @@ export class ConnectorRequests {
 		attempt: Attempt,
 		options: ResponseOptions = {},
 		headers = new Headers(),
-	): Promise<unknown> {
+	): Promise<ApiPayload> {
 		if (response.ok) attempt.succeeded();
 
 		if (response.status === 401 || (!response.ok && options.sensitive)) {
@@ -279,7 +286,7 @@ export class ConnectorRequests {
 			throw this.httpError(response, undefined, options, headers);
 		}
 
-		let payload: unknown;
+		let payload: ApiPayload | undefined;
 
 		try {
 			payload = await this.readPayload(
@@ -296,7 +303,7 @@ export class ConnectorRequests {
 
 		if (!response.ok) throw this.httpError(response, payload, options, headers);
 
-		return payload;
+		return payload ?? null;
 	}
 
 	async readPayload(
@@ -304,7 +311,7 @@ export class ConnectorRequests {
 		signal: AbortSignal,
 		format: ResponseFormat = "json",
 		maxBytes = this.limits.maxResponseBytes,
-	): Promise<unknown> {
+	): Promise<ApiPayload> {
 		if (!response.body) return null;
 		const contentType = response.headers.get("Content-Type");
 		const mediaType = parseMediaType(contentType);
@@ -363,9 +370,7 @@ export class ConnectorRequests {
 		if (!text) return null;
 
 		try {
-			const payload: unknown = JSON.parse(text);
-
-			return payload;
+			return parseJson(text);
 		} catch {
 			if (format === "json-or-text") return text;
 			throw new ConnectorError({
@@ -377,7 +382,7 @@ export class ConnectorRequests {
 
 	httpError(
 		response: Response,
-		payload: unknown,
+		payload: ApiPayload | undefined,
 		options: Pick<HttpRequest, "classifyError" | "sensitive" | "sensitiveValues"> = {},
 		headers = new Headers(),
 	): ConnectorError {
@@ -431,7 +436,7 @@ export class ConnectorRequests {
 
 class Gate {
 	private active = 0;
-	private readonly queued: Array<{ enter(): void; reject(reason: unknown): void }> = [];
+	private readonly queued: Array<{ enter(): void; reject(cause: unknown): void }> = [];
 	constructor(
 		private readonly capacity: number,
 		private readonly maxQueued: number,
@@ -516,16 +521,8 @@ export function createApiUrl(
 	return url;
 }
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-	return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
 export function isScalar(value: unknown): value is boolean | number | string {
-	return (
-		typeof value === "boolean" ||
-		typeof value === "string" ||
-		(typeof value === "number" && Number.isFinite(value))
-	);
+	return apiScalarSchema.safeParse(value).success;
 }
 
 export function parseRetryAfter(value: string | null, now = Date.now()): number | undefined {
@@ -544,8 +541,8 @@ export function parseRetryAfter(value: string | null, now = Date.now()): number 
 	return Number.isFinite(timestamp) ? Math.max(0, timestamp - now) : undefined;
 }
 
-function sanitize(value: unknown, secrets: string[]): string | undefined {
-	if (typeof value !== "string") return undefined;
+function sanitize(value: string | null | undefined, secrets: string[]): string | undefined {
+	if (value === undefined || value === null) return undefined;
 	let text = value;
 
 	for (const secret of secrets) text = text.replaceAll(secret, "[redacted]");
@@ -553,7 +550,7 @@ function sanitize(value: unknown, secrets: string[]): string | undefined {
 	return text.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 1000) || undefined;
 }
 
-function normalizeError(error: unknown, signal: AbortSignal): ConnectorError {
+function normalizeError(cause: unknown, signal: AbortSignal): ConnectorError {
 	if (signal.aborted)
 		return new ConnectorError({
 			category: "timeout",
@@ -561,13 +558,17 @@ function normalizeError(error: unknown, signal: AbortSignal): ConnectorError {
 			retryable: true,
 		});
 
-	if (error instanceof ConnectorError) return error;
+	if (cause instanceof ConnectorError) return cause;
 
 	return new ConnectorError({
 		category: "network",
 		message: "Upstream request failed.",
 		retryable: true,
 	});
+}
+
+function isRequestFactory<T>(value: T | (() => Promise<T>)): value is () => Promise<T> {
+	return requestFactorySchema.safeParse(value).success;
 }
 
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {

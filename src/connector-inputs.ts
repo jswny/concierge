@@ -25,6 +25,7 @@ export function apiRequestSchema(contract: {
 	});
 }
 
+// oxlint-disable-next-line anti-slop/no-unknown-parameters -- This is the shared schema parser at the untrusted Code Mode argument boundary, not an internal domain operation.
 export function parseApiRequest<T extends { method: string; body?: unknown }>(schema: z.ZodType<T>, args: unknown): T {
 	const options = schema.parse(args);
 

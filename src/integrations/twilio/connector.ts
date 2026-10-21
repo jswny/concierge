@@ -3,7 +3,7 @@ import { Buffer } from "node:buffer";
 import { z } from "zod";
 import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
-import { ConnectorRequests, createApiUrl, isRecord, type ApiFailure } from "../../connector-requests";
+import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
 import { apiRequestSchema, apiScalarSchema, parseApiRequest, toToolInputSchema } from "../../connector-inputs";
 
 const API_ORIGIN = "https://api.twilio.com";
@@ -95,11 +95,16 @@ export class TwilioConnector extends ObservedConnector<Env> {
 	}
 }
 
-function classifyTwilioError(_status: number, payload: unknown): ApiFailure {
-	const error = isRecord(payload) ? payload : {};
+const errorSchema = z.object({
+	message: z.string().optional().catch(undefined),
+	code: z.union([z.number(), z.string()]).optional().catch(undefined),
+});
+
+function classifyTwilioError(_status: number, payload: ApiPayload | undefined): ApiFailure {
+	const error = errorSchema.safeParse(payload).data;
 
 	return {
-		message: typeof error.message === "string" ? error.message : undefined,
-		code: typeof error.code === "number" || typeof error.code === "string" ? String(error.code) : undefined,
+		message: error?.message,
+		code: error?.code === undefined ? undefined : String(error.code),
 	};
 }

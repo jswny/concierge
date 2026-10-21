@@ -2,7 +2,7 @@ import type { ConnectorTools } from "@cloudflare/codemode";
 import { z } from "zod";
 import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
-import { ConnectorRequests, createApiUrl, isRecord, type ApiFailure } from "../../connector-requests";
+import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
 import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../connector-inputs";
 
 const API_ORIGIN = "https://api.exa.ai";
@@ -71,13 +71,24 @@ export class ExaConnector extends ObservedConnector<Env> {
 	}
 }
 
-function classifyExaError(_status: number, payload: unknown): ApiFailure {
-	const error = isRecord(payload) ? payload : {};
-	const detail = isRecord(error.error) ? error.error : {};
+const detailSchema = z.object({
+	message: z.string().optional().catch(undefined),
+	code: z.string().optional().catch(undefined),
+});
+
+const errorSchema = z.object({
+	error: z.union([z.string(), detailSchema]).optional().catch(undefined),
+	tag: z.string().optional().catch(undefined),
+	requestId: z.string().optional().catch(undefined),
+});
+
+function classifyExaError(_status: number, payload: ApiPayload | undefined): ApiFailure {
+	const error = errorSchema.safeParse(payload).data;
+	const detail = detailSchema.safeParse(error?.error).data;
 
 	return {
-		message: typeof error.error === "string" ? error.error : typeof detail.message === "string" ? detail.message : undefined,
-		code: typeof error.tag === "string" ? error.tag : typeof detail.code === "string" ? detail.code : undefined,
-		requestId: typeof error.requestId === "string" ? error.requestId : undefined,
+		message: z.string().safeParse(error?.error).data ?? detail?.message,
+		code: error?.tag ?? detail?.code,
+		requestId: error?.requestId,
 	};
 }

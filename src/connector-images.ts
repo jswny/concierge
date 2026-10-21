@@ -1,4 +1,5 @@
 import { isImageMimeType, type ImageMimeType } from "./response-formats";
+import { z } from "zod";
 
 export type ConnectorImage = {
 	type: "image";
@@ -7,6 +8,10 @@ export type ConnectorImage = {
 };
 
 type ImageReference = Omit<ConnectorImage, "data"> & { imageId: string; byteLength: number };
+
+const imageIdentity = z.object({ type: z.literal("image"), mimeType: z.custom<ImageMimeType>(isImageMimeType) });
+const imageReferenceSchema = imageIdentity.extend({ imageId: z.string(), byteLength: z.number() });
+const connectorImageSchema = imageIdentity.extend({ data: z.instanceof(Uint8Array) });
 
 /** Request-local bytes; Code Mode's durable history carries only execution-scoped references. */
 export class ConnectorImages {
@@ -43,16 +48,9 @@ export class ConnectorImages {
 }
 
 export function isImageReference(value: unknown): value is ImageReference {
-	return typeof value === "object" && value !== null &&
-		"type" in value && value.type === "image" &&
-		"mimeType" in value && isImageMimeType(value.mimeType) &&
-		"imageId" in value && typeof value.imageId === "string" &&
-		"byteLength" in value && typeof value.byteLength === "number";
+	return imageReferenceSchema.safeParse(value).success;
 }
 
 export function isConnectorImage(value: unknown): value is ConnectorImage {
-	return typeof value === "object" && value !== null &&
-		"type" in value && value.type === "image" &&
-		"mimeType" in value && isImageMimeType(value.mimeType) &&
-		"data" in value && value.data instanceof Uint8Array;
+	return connectorImageSchema.safeParse(value).success;
 }

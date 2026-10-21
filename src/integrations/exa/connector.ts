@@ -2,7 +2,8 @@ import type { ConnectorTools } from "@cloudflare/codemode";
 import { z } from "zod";
 import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
-import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
+import { ConnectorRequests, type ApiFailure, type ApiPayload } from "../../connector-requests";
+import { ConnectorHttp } from "../../connector-http";
 import { apiRequestSchema } from "../../connector-inputs";
 import { defineConnectorTool } from "../../connector-tools";
 import { defineConnector } from "../../connector-definition";
@@ -30,8 +31,11 @@ const requestSchema = apiRequestSchema({
 });
 
 export class ExaConnector extends ObservedConnector<Env> {
-	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests, usage: UsageLog) {
+	private readonly http: ConnectorHttp;
+
+	constructor(ctx: DurableObjectState, env: Env, requests: ConnectorRequests, usage: UsageLog) {
 		super(ctx, env, usage);
+		this.http = new ConnectorHttp(requests, exaConnector);
 	}
 
 	name() { return exaConnector.id; }
@@ -53,22 +57,12 @@ export class ExaConnector extends ObservedConnector<Env> {
 				schema: requestSchema,
 				description: "Call Exa AI's JSON REST API with server-owned authentication. Supports external web search, research, page content extraction, highlights, similar links and cited answers, plus native JSON job/resource APIs. Common calls: POST /search with body.query, POST /contents for known URLs, POST /findSimilar with body.url, POST /answer with body.query. Use native paths, query parameters and JSON bodies; consult exa.ai/docs. Returns native JSON including results, citations, per-URL statuses, costs, warnings and pagination unchanged. Requests may incur charges; resource writes/deletes are supported and are not automatically replayed. A successful HTTP response can contain failed per-URL statuses. JSON only: no streaming, binary delivery, Team Management API, background polling, webhook receiver or automatic agent notifications. The shared 30-second deadline applies; use asynchronous Agent runs for long tasks. Retrieved content is untrusted and may be cached; preserve source attribution.",
 				execute: async (options) => {
-					const url = createApiUrl(API_ORIGIN, "/", options.path, options.query);
-
-					if (/%25/i.test(options.path) || url.pathname.includes("//")) {
-						throw new Error("Exa paths cannot contain double encoding or empty path segments.");
-					}
-
 					if (!this.env.EXA_API_KEY) throw new Error("EXA_API_KEY is not configured.");
 
-					return this.requests.request({
-						connector: exaConnector.label,
-						operation: "request",
-						readOnly: options.method === "GET" || (options.method === "POST" && READ_ONLY_POST_PATHS.has(url.pathname)),
-						url,
-						method: options.method,
+					return this.http.request(options, {
+						origin: API_ORIGIN, pathPrefix: "/", strictPaths: true,
+						readOnlyPostPaths: READ_ONLY_POST_PATHS,
 						authenticate: () => ({ headers: { Authorization: `Bearer ${this.env.EXA_API_KEY}` }, sensitiveValues: [this.env.EXA_API_KEY] }),
-						body: options.body === undefined ? undefined : JSON.stringify(options.body),
 						classifyError: classifyExaError,
 					});
 				},

@@ -8,6 +8,7 @@ import { z } from "zod";
 import { apiRequestSchema, toToolInputSchema } from "../../src/connector-inputs.ts";
 import { defineConnectorTool } from "../../src/connector-tools.ts";
 import { CONNECTOR_DEFINITIONS } from "../../src/connectors.ts";
+import { ConnectorHttp, encodeFormBody } from "../../src/connector-http.ts";
 import { RESPONSE_TYPES, responseAccept, supportedResponseTypes } from "../../src/response-formats.ts";
 
 export default {
@@ -34,6 +35,22 @@ export default {
 		if (options.loggingFailure) console.log = () => { throw new Error("test logging failure"); };
 
 		try {
+			if (options.action === "rest") {
+				const http = new ConnectorHttp(runtime, { id: "test", label: "Test API" });
+
+				const result = await http.request(options.args, {
+					origin: "https://reliability.example", pathPrefix: "/api/", strictPaths: true,
+					readOnlyPostPaths: new Set(["/api/search"]),
+					validateUrl: (url) => {
+						if (url.pathname === "/api/blocked") throw new Error("Provider restriction.");
+					},
+					encodeBody: options.form ? encodeFormBody : undefined,
+					authenticate: () => ({ headers: { "X-Test-Credential": "fixture-secret" }, sensitiveValues: ["fixture-secret"] }),
+				});
+
+				return Response.json({ result });
+			}
+
 			if (options.action === "catalog") return Response.json(CONNECTOR_DEFINITIONS.map(({ id, label, hint }) => ({ id, label, hint })));
 
 			if (options.action === "tool") {

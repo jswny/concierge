@@ -4,7 +4,8 @@ import { Buffer } from "node:buffer";
 import { z } from "zod";
 import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
-import { ConnectorError, ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload, type RequestAuthentication } from "../../connector-requests";
+import { ConnectorError, ConnectorRequests, type ApiFailure, type ApiPayload, type RequestAuthentication } from "../../connector-requests";
+import { ConnectorHttp } from "../../connector-http";
 import { apiRequestSchema } from "../../connector-inputs";
 import { defineConnectorTool } from "../../connector-tools";
 import { defineConnector } from "../../connector-definition";
@@ -29,9 +30,11 @@ const keyIdSchema = z.string().trim().min(1).max(256).regex(/^[A-Za-z0-9_-]+$/);
 
 export class KalshiConnector extends ObservedConnector<Env> {
 	private key?: KeyObject;
+	private readonly http: ConnectorHttp;
 
-	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests, usage: UsageLog) {
+	constructor(ctx: DurableObjectState, env: Env, requests: ConnectorRequests, usage: UsageLog) {
 		super(ctx, env, usage);
+		this.http = new ConnectorHttp(requests, kalshiConnector);
 	}
 
 	name() { return kalshiConnector.id; }
@@ -51,21 +54,14 @@ export class KalshiConnector extends ObservedConnector<Env> {
 				schema: requestSchema,
 				description: "Call the authenticated Kalshi production prediction-market REST API for market odds, bid/ask prices, order books, events, series, candlesticks, historical data, volume, liquidity, market rules and private account balances, positions, orders and fills. Use native /trade-api/v2/ paths, HTTP methods, query parameters and JSON bodies; consult docs.kalshi.com. Credentials and request signing are server-owned. Key scopes determine permissions: read-only keys cannot trade; write-capable keys can perform financial mutations. This wrapper has no GET-only restriction. GET reads may retry; writes never automatically replay, even on 429. An accepted order is not necessarily filled; verify unknown outcomes before resubmitting. Returns native JSON, cursor pagination, fixed-point price strings and quantities unchanged, or null for empty responses. No API-key management, alternate/demo/Perps origins, WebSockets, streaming or automatic monitoring. Preserve quote timestamps, spreads, liquidity and settlement rules; prices are not guaranteed probabilities or execution prices.",
 				execute: async (options) => {
-					const url = createApiUrl(API_ORIGIN, API_PREFIX, options.path, options.query);
-
-					if (/%25/i.test(options.path) || url.pathname.includes("//")) {
-						throw new Error("Kalshi paths cannot contain double encoding or empty path segments.");
-					}
-
-					if (/^api_keys(?:\/|$)/i.test(decodeURIComponent(url.pathname.slice(API_PREFIX.length)))) {
-						throw new Error("Kalshi API-key management endpoints are not exposed.");
-					}
-
-					return this.requests.request({
-						connector: kalshiConnector.label, operation: "request", readOnly: options.method === "GET",
-						url, method: options.method,
-						authenticate: () => this.authenticate(options.method, url.pathname),
-						body: options.body === undefined ? undefined : JSON.stringify(options.body),
+					return this.http.request(options, {
+						origin: API_ORIGIN, pathPrefix: API_PREFIX, strictPaths: true,
+						validateUrl: (url) => {
+							if (/^api_keys(?:\/|$)/i.test(decodeURIComponent(url.pathname.slice(API_PREFIX.length)))) {
+								throw new Error("Kalshi API-key management endpoints are not exposed.");
+							}
+						},
+						authenticate: ({ method, url }) => this.authenticate(method, url.pathname),
 						classifyError: classifyKalshiError,
 					});
 				},

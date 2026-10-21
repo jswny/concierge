@@ -2,7 +2,8 @@ import type { ConnectorTools } from "@cloudflare/codemode";
 import { z } from "zod";
 import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
-import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
+import { ConnectorRequests, type ApiFailure, type ApiPayload } from "../../connector-requests";
+import { ConnectorHttp } from "../../connector-http";
 import { apiRequestSchema } from "../../connector-inputs";
 import { defineConnectorTool } from "../../connector-tools";
 import { ConnectorImages, isConnectorImage } from "../../connector-images";
@@ -26,8 +27,11 @@ const requestSchema = apiRequestSchema({
 });
 
 export class UnifiConnector extends ObservedConnector<Env> {
-	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests, private readonly images: ConnectorImages, usage: UsageLog) {
+	private readonly http: ConnectorHttp;
+
+	constructor(ctx: DurableObjectState, env: Env, requests: ConnectorRequests, private readonly images: ConnectorImages, usage: UsageLog) {
 		super(ctx, env, usage);
+		this.http = new ConnectorHttp(requests, unifiConnector);
 	}
 
 	name() {
@@ -52,28 +56,18 @@ export class UnifiConnector extends ObservedConnector<Env> {
 				schema: requestSchema,
 				description: `Call official UniFi APIs for console discovery and management of networking/Wi-Fi, connected clients, APs, switches, gateways, networks, camera/NVR status, Protect settings and controls, and JPEG camera snapshots. Use native /v1/ Site Manager paths (start with GET /v1/hosts), or /v1/connector/consoles/{consoleId}/proxy/{network|protect}/integration/v1/... for application calls. Encode IDs as path segments. Network siteId values come from the console's Network sites, not Site Manager. Consult developer.ui.com for supported endpoints and installed versions. Authentication is server-owned; permitted writes/deletes are supported and can disrupt network/security settings. Returns native JSON and pagination unchanged, null for empty responses, or an opaque image reference for Protect cameras/{id}/snapshot (${RESPONSE_TYPES.jpeg.mimeType}). Return image references unchanged, directly or nested in an object/array, in the same invocation to deliver MCP images. No raw image bytes in Code Mode; do not stringify references or reuse them across invocations. Retrieve at most four images totaling 4 MiB per invocation. No video, other image formats, NAS/Drive, legacy API, or event streaming.`,
 				execute: async (options, execution) => {
-					const url = createApiUrl(API_ORIGIN, "/v1/", options.path, options.query);
-
-					// The cloud proxy must not become an escape hatch into console-internal APIs.
-					if (/%25/i.test(options.path) || url.pathname.includes("//")) {
-						throw new Error("UniFi paths cannot contain double encoding or empty path segments.");
-					}
-
-					if ((url.pathname === "/v1/connector" || url.pathname.startsWith("/v1/connector/")) && !PROXY_PATH.test(url.pathname)) {
-						throw new Error("UniFi cloud proxy paths must target the Network or Protect integration/v1 API.");
-					}
-
 					if (!this.env.UNIFI_API_KEY) throw new Error("UNIFI_API_KEY is not configured.");
 
-					const result = await this.requests.request({
-						connector: unifiConnector.label,
-						operation: "request",
-						readOnly: options.method === "GET",
-						url,
-						method: options.method,
+					const result = await this.http.request(options, {
+						origin: API_ORIGIN, pathPrefix: "/v1/", strictPaths: true,
+						validateUrl: (url) => {
+							// The cloud proxy must not become an escape hatch into console-internal APIs.
+							if ((url.pathname === "/v1/connector" || url.pathname.startsWith("/v1/connector/")) && !PROXY_PATH.test(url.pathname)) {
+								throw new Error("UniFi cloud proxy paths must target the Network or Protect integration/v1 API.");
+								}
+						},
 						format: "json-or-image",
 						authenticate: () => ({ headers: { "X-API-Key": this.env.UNIFI_API_KEY }, sensitiveValues: [this.env.UNIFI_API_KEY] }),
-						body: options.body === undefined ? undefined : JSON.stringify(options.body),
 						classifyError: classifyUnifiError,
 					});
 

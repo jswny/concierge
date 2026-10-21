@@ -2,7 +2,8 @@ import type { ConnectorTools } from "@cloudflare/codemode";
 import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
 import { z } from "zod";
-import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
+import { ConnectorRequests, type ApiFailure, type ApiPayload } from "../../connector-requests";
+import { ConnectorHttp } from "../../connector-http";
 import { apiRequestSchema } from "../../connector-inputs";
 import { defineConnectorTool } from "../../connector-tools";
 import { defineConnector } from "../../connector-definition";
@@ -39,8 +40,11 @@ const requestSchema = apiRequestSchema({ methods: ["GET", "POST"], pathPrefix: "
 });
 
 export class MapsConnector extends ObservedConnector<Env> {
-	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests, usage: UsageLog) {
+	private readonly http: ConnectorHttp;
+
+	constructor(ctx: DurableObjectState, env: Env, requests: ConnectorRequests, usage: UsageLog) {
 		super(ctx, env, usage);
+		this.http = new ConnectorHttp(requests, mapsConnector);
 	}
 
 	name() {
@@ -67,18 +71,12 @@ export class MapsConnector extends ObservedConnector<Env> {
 				execute: async (options) => {
 					if (!this.env.GOOGLE_MAPS_API_KEY) throw new Error("GOOGLE_MAPS_API_KEY is not configured.");
 
-					const url = options.service === "places"
-						? createApiUrl(PLACES_ORIGIN, "/v1/", options.path, options.query)
-						: createApiUrl(ROUTES_ORIGIN, "/", options.path, options.query);
-
-					return this.requests.request({
-						connector: mapsConnector.label,
+					return this.http.request(options, {
+						origin: options.service === "places" ? PLACES_ORIGIN : ROUTES_ORIGIN,
+						pathPrefix: options.service === "places" ? "/v1/" : "/",
 						operation: options.service,
-						readOnly: options.method === "GET" || READ_ONLY_POST_PATHS.has(url.pathname),
-						url,
-						method: options.method,
+						readOnlyPostPaths: READ_ONLY_POST_PATHS,
 						authenticate: () => ({ headers: { "X-Goog-Api-Key": this.env.GOOGLE_MAPS_API_KEY }, sensitiveValues: [this.env.GOOGLE_MAPS_API_KEY] }),
-						body: options.body === undefined ? undefined : JSON.stringify(options.body),
 						classifyError: classifyMapsError,
 					});
 				},

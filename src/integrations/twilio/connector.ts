@@ -3,7 +3,8 @@ import { Buffer } from "node:buffer";
 import { z } from "zod";
 import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
-import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
+import { ConnectorRequests, type ApiFailure, type ApiPayload } from "../../connector-requests";
+import { ConnectorHttp, encodeFormBody } from "../../connector-http";
 import { apiRequestSchema, apiScalarSchema } from "../../connector-inputs";
 import { defineConnectorTool } from "../../connector-tools";
 import { defineConnector } from "../../connector-definition";
@@ -30,8 +31,11 @@ const requestSchema = apiRequestSchema({
 });
 
 export class TwilioConnector extends ObservedConnector<Env> {
-	constructor(ctx: DurableObjectState, env: Env, private readonly requests: ConnectorRequests, usage: UsageLog) {
+	private readonly http: ConnectorHttp;
+
+	constructor(ctx: DurableObjectState, env: Env, requests: ConnectorRequests, usage: UsageLog) {
 		super(ctx, env, usage);
+		this.http = new ConnectorHttp(requests, twilioConnector);
 	}
 
 	name() { return twilioConnector.id; }
@@ -64,36 +68,17 @@ export class TwilioConnector extends ObservedConnector<Env> {
 
 					const path = options.path.replace("{AccountSid}", accountSid);
 					const prefix = `${API_PREFIX}${accountSid}/`;
-					const url = createApiUrl(API_ORIGIN, prefix, path, options.query);
-
-					if (/%25/i.test(path) || url.pathname.includes("//")) {
-						throw new Error("Twilio paths cannot contain double encoding or empty path segments.");
-					}
-
-					if (/^(Keys|SigningKeys|Tokens)(\/|\.json$)/i.test(decodeURIComponent(url.pathname.slice(prefix.length)))) {
-						throw new Error("Twilio credential-management endpoints are not exposed.");
-					}
-
-					const body = options.body === undefined ? undefined : new URLSearchParams();
-
-					if (body) for (const [key, value] of Object.entries(options.body ?? {})) {
-						for (const item of Array.isArray(value) ? value : [value]) body.append(key, String(item));
-					}
-
 					const encoded = Buffer.from(`${keySid}:${secret}`).toString("base64");
-					const headers = new Headers();
 
-					if (body) headers.set("Content-Type", "application/x-www-form-urlencoded");
-
-					return this.requests.request({
-						connector: twilioConnector.label,
-						operation: "request",
-						readOnly: options.method === "GET",
-						url,
-						method: options.method,
-						headers,
+					return this.http.request({ ...options, path }, {
+						origin: API_ORIGIN, pathPrefix: prefix, strictPaths: true,
+						validateUrl: (url) => {
+							if (/^(Keys|SigningKeys|Tokens)(\/|\.json$)/i.test(decodeURIComponent(url.pathname.slice(prefix.length)))) {
+								throw new Error("Twilio credential-management endpoints are not exposed.");
+								}
+						},
+						encodeBody: encodeFormBody,
 						authenticate: () => ({ headers: { Authorization: `Basic ${encoded}` }, sensitiveValues: [keySid, secret, encoded] }),
-						body,
 						classifyError: classifyTwilioError,
 					});
 				},

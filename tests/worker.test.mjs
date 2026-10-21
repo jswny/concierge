@@ -3201,6 +3201,45 @@ test("shares bounded reliability behavior across connector operations", async (t
 		const json = await run({ action: "body", format: "json-or-image", closeBody: true, body: '{"native":true}', headers: { "Content-Type": "application/json" } });
 		assert.deepEqual(json.results[0].result, { native: true });
 	});
+	await t.test("shares provider-bound REST encoding, URL restrictions and read-only POST policies", async () => {
+		const originalFetch = globalThis.fetch;
+		const requests = [];
+		let status = 200;
+		globalThis.fetch = async (input, init) => {
+			const request = new Request(input, init);
+			requests.push({ method: request.method, url: request.url, headers: Object.fromEntries(request.headers), body: await request.text() });
+
+			return Response.json({ native: true }, { status });
+		};
+
+		try {
+			const args = { method: "POST", path: "/api/items", query: { tag: ["one", "two"] }, body: { native: [1, true] } };
+			assert.deepEqual((await run({ action: "rest", args })).result, { native: true });
+			assert.equal(requests[0].url, "https://reliability.example/api/items?tag=one&tag=two");
+			assert.equal(requests[0].headers["content-type"], "application/json");
+			assert.equal(requests[0].headers["x-test-credential"], "fixture-secret");
+			assert.deepEqual(JSON.parse(requests[0].body), args.body);
+			await run({ action: "rest", form: true, args: { ...args, body: { To: ["first", "second"], Enabled: true } } });
+			assert.equal(requests[1].headers["content-type"], "application/x-www-form-urlencoded");
+			assert.deepEqual([...new URLSearchParams(requests[1].body)], [["To", "first"], ["To", "second"], ["Enabled", "true"]]);
+
+			for (const path of ["https://evil.example/api/items", "/api/a%252fb", "/api//items", "/api/blocked"]) {
+				assert.ok((await run({ action: "rest", args: { method: "GET", path } })).error);
+			}
+
+			assert.equal(requests.length, 2);
+			status = 503;
+
+			for (const [method, path, expected] of [["GET", "/api/items", 3], ["POST", "/api/search", 3], ["POST", "/api/items", 1], ["DELETE", "/api/search", 1]]) {
+				requests.length = 0;
+				const failed = await run({ action: "rest", args: { method, path, readOnly: true } });
+				assert.ok(failed.error);
+				assert.equal(requests.length, expected);
+			}
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
 	await t.test("pairs refreshed authentication with generic error redaction on every attempt", async () => {
 		const originalFetch = globalThis.fetch;
 		const attempts = [];

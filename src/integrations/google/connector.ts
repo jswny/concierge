@@ -3,7 +3,8 @@ import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
 import { z } from "zod";
 import { GoogleWorkspaceAuth } from "./auth";
-import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
+import { ConnectorRequests, type ApiFailure, type ApiPayload } from "../../connector-requests";
+import { ConnectorHttp } from "../../connector-http";
 import { apiRequestSchema } from "../../connector-inputs";
 import { defineConnectorTool } from "../../connector-tools";
 import { defineConnector } from "../../connector-definition";
@@ -42,8 +43,11 @@ const requestSchema = apiRequestSchema({
 type GoogleRequest = z.infer<typeof requestSchema>;
 
 export class GoogleConnector extends ObservedConnector<Env> {
-	constructor(ctx: DurableObjectState, env: Env, private readonly auth: GoogleWorkspaceAuth, private readonly requests: ConnectorRequests, usage: UsageLog) {
+	private readonly http: ConnectorHttp;
+
+	constructor(ctx: DurableObjectState, env: Env, private readonly auth: GoogleWorkspaceAuth, requests: ConnectorRequests, usage: UsageLog) {
 		super(ctx, env, usage);
+		this.http = new ConnectorHttp(requests, googleConnector);
 	}
 
 	name() {
@@ -72,20 +76,15 @@ export class GoogleConnector extends ObservedConnector<Env> {
 
 	private async request(options: GoogleRequest) {
 		const service = SERVICES[options.service];
-		const url = createApiUrl(service.origin, service.pathPrefix, options.path, options.query);
 
-		return this.requests.request({
-			connector: googleConnector.label,
+		return this.http.request(options, {
+			origin: service.origin, pathPrefix: service.pathPrefix,
 			operation: options.service,
-			readOnly: options.method === "GET",
-			url,
-			method: options.method,
 			authenticate: async () => {
 				const token = await this.auth.accessToken(service.scopes);
 
 				return { headers: { Authorization: `Bearer ${token}` }, sensitiveValues: [token] };
 			},
-			body: options.body === undefined ? undefined : JSON.stringify(options.body),
 			onResponse: (response, headers) => {
 				if (response.status === 401) this.auth.invalidate(headers.get("Authorization")!.slice(7));
 			},

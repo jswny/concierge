@@ -12,14 +12,8 @@ import { z } from "zod";
 import { parseJson, type JsonValue } from "./json";
 import { Buffer } from "node:buffer";
 import { handleAccessRequest } from "./access-handler";
-import { CloudflareConnector } from "./cloudflare-connector";
 import { GoogleWorkspaceAuth } from "./integrations/google/auth";
-import { GoogleConnector } from "./integrations/google/connector";
-import { MapsConnector } from "./integrations/maps/connector";
-import { UnifiConnector } from "./integrations/unifi/connector";
-import { TwilioConnector } from "./integrations/twilio/connector";
-import { ExaConnector } from "./integrations/exa/connector";
-import { KalshiConnector } from "./integrations/kalshi/connector";
+import { createConnectors } from "./connectors";
 import { ConnectorRequests } from "./connector-requests";
 import { boundMcpRequest, MAX_CODE_CHARS } from "./mcp-requests";
 import { observeCodeExecution } from "./code-execution";
@@ -77,37 +71,15 @@ function createConciergeServer(
 
 	if (hasTwilioWebhookKey(env)) registerEventMethods(server, [twilioMessageEvents], events, eventOwner);
 
+	const { connectors, connectorHints } = createConnectors({ ctx, env, googleAuth, requests, images, usage });
+
 	const runtime = createCodemodeRuntime({
-		connectors: [
-			new CloudflareConnector(ctx, env, requests, usage),
-			new GoogleConnector(ctx, env, googleAuth, requests, usage),
-			new MapsConnector(ctx, env, requests, usage),
-			new UnifiConnector(ctx, env, requests, images, usage),
-			new TwilioConnector(ctx, env, requests, usage),
-			new ExaConnector(ctx, env, requests, usage),
-			new KalshiConnector(ctx, env, requests, usage),
-		],
+		connectors,
 		ctx,
 		executor: new DynamicWorkerExecutor({ loader: env.LOADER }),
 	});
 
-	const codeToolDescription = runtime.tool({
-		connectorHints: {
-			cloudflare: "Read live rendered public webpages as Markdown with source metadata, bounded loading controls and continuation reads through Cloudflare Browser Run. Rendering-result caching is disabled; this is not an interactive or logged-in browser.",
-			google:
-				"Call Google Workspace APIs as joe@j1.io through google.request. Gmail email and settings are enabled; consult official API documentation for request details.",
-			maps:
-				"Use maps.request for public businesses, places, ratings, hours, reviews, directions, travel times, distances, and route matrices through Places API (New) and Routes API. Prefer these APIs over reading Google Maps webpages for supported tasks. Consult official API documentation; pass field masks in query.fields. Requests may incur charges; select only needed fields and preserve Google Maps attribution.",
-			unifi:
-				"Use unifi.request for UniFi console discovery, networking/Wi-Fi clients and devices, Protect camera/NVR status and settings, and JPEG camera snapshots through official cloud APIs. Start with GET /v1/hosts, then use console-specific Network/Protect integration paths. Permitted writes and deletes are supported; no NAS files, video, or event streaming.",
-			twilio:
-				"Use twilio.request for core Twilio REST API access: send SMS/MMS, read incoming/outgoing message history and delivery status, manage voice calls, phone numbers, and usage. Native account-scoped .json paths and form parameters; credentials are server-owned. Writes can incur charges. When inbound webhooks are configured, event-capable clients can separately subscribe to twilio.message.received through MCP Events. No personal iMessage history or binary media delivery.",
-			exa:
-				"Use exa.request for external web search, research, page content extraction, highlights, similar links and cited answers through Exa AI's JSON API. Native request bodies and responses; credentials are server-owned. Requests can incur charges. No streaming, background polling or agent wakeups.",
-			kalshi:
-				"Use kalshi.request for authenticated Kalshi prediction-market odds, bid/ask quotes, order books, market rules and account balances, positions, orders and fills. Native /trade-api/v2/ REST requests; server-owned key scopes determine access. No GET-only restriction: write-capable keys can perform financial transactions. No WebSockets or background monitoring.",
-		},
-	}).description;
+	const codeToolDescription = runtime.tool({ connectorHints }).description;
 
 	server.registerTool(
 		"code",

@@ -7,6 +7,14 @@ import { apiRequestSchema } from "../../connector-inputs";
 import { defineConnectorTool } from "../../connector-tools";
 import { ConnectorImages, isConnectorImage } from "../../connector-images";
 import { RESPONSE_TYPES } from "../../response-formats";
+import { defineConnector } from "../../connector-definition";
+
+export const unifiConnector = defineConnector({
+	id: "unifi",
+	label: "UniFi",
+	hint: "Use unifi.request for UniFi console discovery, networking/Wi-Fi clients and devices, Protect camera/NVR status and settings, and JPEG camera snapshots through official cloud APIs. Start with GET /v1/hosts, then use console-specific Network/Protect integration paths. Permitted writes and deletes are supported; no NAS files, video, or event streaming.",
+	create: ({ ctx, env, requests, images, usage }) => new UnifiConnector(ctx, env, requests, images, usage),
+});
 
 const API_ORIGIN = "https://api.ui.com";
 const PROXY_PATH = /^\/v1\/connector\/consoles\/[^/]+\/proxy\/(network|protect)\/integration\/v1\//;
@@ -23,7 +31,7 @@ export class UnifiConnector extends ObservedConnector<Env> {
 	}
 
 	name() {
-		return "unifi";
+		return unifiConnector.id;
 	}
 
 	protected instructions() {
@@ -58,7 +66,7 @@ export class UnifiConnector extends ObservedConnector<Env> {
 					if (!this.env.UNIFI_API_KEY) throw new Error("UNIFI_API_KEY is not configured.");
 
 					const result = await this.requests.request({
-						connector: "UniFi",
+						connector: unifiConnector.label,
 						operation: "request",
 						readOnly: options.method === "GET",
 						url,

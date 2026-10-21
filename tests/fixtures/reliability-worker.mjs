@@ -7,6 +7,7 @@ import {
 import { z } from "zod";
 import { apiRequestSchema, toToolInputSchema } from "../../src/connector-inputs.ts";
 import { defineConnectorTool } from "../../src/connector-tools.ts";
+import { CONNECTOR_DEFINITIONS } from "../../src/connectors.ts";
 import { RESPONSE_TYPES, responseAccept, supportedResponseTypes } from "../../src/response-formats.ts";
 
 export default {
@@ -33,6 +34,8 @@ export default {
 		if (options.loggingFailure) console.log = () => { throw new Error("test logging failure"); };
 
 		try {
+			if (options.action === "catalog") return Response.json(CONNECTOR_DEFINITIONS.map(({ id, label, hint }) => ({ id, label, hint })));
+
 			if (options.action === "tool") {
 				const tool = defineConnectorTool({
 					description: "Test inferred and validated tool arguments.",

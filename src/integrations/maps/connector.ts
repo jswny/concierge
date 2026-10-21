@@ -5,6 +5,14 @@ import { z } from "zod";
 import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
 import { apiRequestSchema } from "../../connector-inputs";
 import { defineConnectorTool } from "../../connector-tools";
+import { defineConnector } from "../../connector-definition";
+
+export const mapsConnector = defineConnector({
+	id: "maps",
+	label: "Maps",
+	hint: "Use maps.request for public businesses, places, ratings, hours, reviews, directions, travel times, distances, and route matrices through Places API (New) and Routes API. Prefer these APIs over reading Google Maps webpages for supported tasks. Consult official API documentation; pass field masks in query.fields. Requests may incur charges; select only needed fields and preserve Google Maps attribution.",
+	create: ({ ctx, env, requests, usage }) => new MapsConnector(ctx, env, requests, usage),
+});
 
 const PLACES_ORIGIN = "https://places.googleapis.com";
 const ROUTES_ORIGIN = "https://routes.googleapis.com";
@@ -36,7 +44,7 @@ export class MapsConnector extends ObservedConnector<Env> {
 	}
 
 	name() {
-		return "maps";
+		return mapsConnector.id;
 	}
 
 	protected instructions() {
@@ -64,7 +72,7 @@ export class MapsConnector extends ObservedConnector<Env> {
 						: createApiUrl(ROUTES_ORIGIN, "/", options.path, options.query);
 
 					return this.requests.request({
-						connector: "Maps",
+						connector: mapsConnector.label,
 						operation: options.service,
 						readOnly: options.method === "GET" || READ_ONLY_POST_PATHS.has(url.pathname),
 						url,

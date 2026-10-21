@@ -5,6 +5,14 @@ import { z } from "zod";
 import { ConnectorError, ConnectorRequests, type ApiFailure, type ApiPayload } from "./connector-requests";
 import { toToolInputSchema } from "./connector-inputs";
 import { defineConnectorTool } from "./connector-tools";
+import { defineConnector } from "./connector-definition";
+
+export const cloudflareConnector = defineConnector({
+	id: "cloudflare",
+	label: "Cloudflare",
+	hint: "Read live rendered public webpages as Markdown with source metadata, bounded loading controls and continuation reads through Cloudflare Browser Run. Rendering-result caching is disabled; this is not an interactive or logged-in browser.",
+	create: ({ ctx, env, requests, usage }) => new CloudflareConnector(ctx, env, requests, usage),
+});
 
 const markdownSchema = z.strictObject({
 	url: z.url().max(4_000).describe("The HTTP(S) webpage URL to render and convert to Markdown."),
@@ -54,7 +62,7 @@ export class CloudflareConnector extends ObservedConnector<Env> {
 	}
 
 	name() {
-		return "cloudflare";
+		return cloudflareConnector.id;
 	}
 
 	protected instructions() {
@@ -75,7 +83,7 @@ export class CloudflareConnector extends ObservedConnector<Env> {
 
 					if (!["http:", "https:"].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password) throw new Error("Only public HTTP and HTTPS URLs without credentials are supported.");
 
-					return this.requests.run({ connector: "Cloudflare", operation: "read_webpage_as_markdown", readOnly: true, timeoutMs: 45_000 }, async (attempt) => {
+					return this.requests.run({ connector: cloudflareConnector.label, operation: "read_webpage_as_markdown", readOnly: true, timeoutMs: 45_000 }, async (attempt) => {
 						const budget = Math.max(1, attempt.remainingMs() - 1_000);
 						const actionTimeout = Math.max(1, Math.min(5_000, Math.floor(budget / 5)));
 						const selectorTimeout = waitForSelector ? Math.max(1, Math.min(waitForSelector.timeout ?? 10_000, Math.floor(budget / 3))) : 0;

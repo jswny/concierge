@@ -6,6 +6,14 @@ import { GoogleWorkspaceAuth } from "./auth";
 import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
 import { apiRequestSchema } from "../../connector-inputs";
 import { defineConnectorTool } from "../../connector-tools";
+import { defineConnector } from "../../connector-definition";
+
+export const googleConnector = defineConnector({
+	id: "google",
+	label: "Google",
+	hint: "Call Google Workspace APIs as joe@j1.io through google.request. Gmail email and settings are enabled; consult official API documentation for request details.",
+	create: ({ ctx, env, googleAuth, requests, usage }) => new GoogleConnector(ctx, env, googleAuth, requests, usage),
+});
 
 const SERVICES = {
 	gmail: {
@@ -39,7 +47,7 @@ export class GoogleConnector extends ObservedConnector<Env> {
 	}
 
 	name() {
-		return "google";
+		return googleConnector.id;
 	}
 
 	protected instructions() {
@@ -67,7 +75,7 @@ export class GoogleConnector extends ObservedConnector<Env> {
 		const url = createApiUrl(service.origin, service.pathPrefix, options.path, options.query);
 
 		return this.requests.request({
-			connector: "Google",
+			connector: googleConnector.label,
 			operation: options.service,
 			readOnly: options.method === "GET",
 			url,

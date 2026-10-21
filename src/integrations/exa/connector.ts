@@ -5,6 +5,14 @@ import { UsageLog } from "../../usage-logging";
 import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
 import { apiRequestSchema } from "../../connector-inputs";
 import { defineConnectorTool } from "../../connector-tools";
+import { defineConnector } from "../../connector-definition";
+
+export const exaConnector = defineConnector({
+	id: "exa",
+	label: "Exa",
+	hint: "Use exa.request for external web search, research, page content extraction, highlights, similar links and cited answers through Exa AI's JSON API. Native request bodies and responses; credentials are server-owned. Requests can incur charges. No streaming, background polling or agent wakeups.",
+	create: ({ ctx, env, requests, usage }) => new ExaConnector(ctx, env, requests, usage),
+});
 
 const API_ORIGIN = "https://api.exa.ai";
 const READ_ONLY_POST_PATHS = new Set(["/search", "/contents", "/findSimilar", "/answer"]);
@@ -26,7 +34,7 @@ export class ExaConnector extends ObservedConnector<Env> {
 		super(ctx, env, usage);
 	}
 
-	name() { return "exa"; }
+	name() { return exaConnector.id; }
 
 	protected instructions() {
 		return [
@@ -54,7 +62,7 @@ export class ExaConnector extends ObservedConnector<Env> {
 					if (!this.env.EXA_API_KEY) throw new Error("EXA_API_KEY is not configured.");
 
 					return this.requests.request({
-						connector: "Exa",
+						connector: exaConnector.label,
 						operation: "request",
 						readOnly: options.method === "GET" || (options.method === "POST" && READ_ONLY_POST_PATHS.has(url.pathname)),
 						url,

@@ -2995,6 +2995,22 @@ test("shares bounded reliability behavior across connector operations", async (t
 		method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(options),
 	})).json();
 
+	await t.test("keeps registered namespaces, metadata and discovery hints aligned", async () => {
+		const catalog = await run({ action: "catalog" });
+		assert.equal(new Set(catalog.map(({ id }) => id)).size, catalog.length);
+		assert.equal(new Set(catalog.map(({ label }) => label)).size, catalog.length);
+		await withMcpClient(undefined, async (client) => {
+			const { tools: [tool] } = await client.listTools();
+
+			for (const entry of catalog) {
+				assert.ok(entry.hint.length > 0);
+				assert.ok(tool.description.includes(entry.hint));
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await codemode.describe(${JSON.stringify(entry.id)})` } });
+				assert.equal(result.isError, undefined);
+				assert.match(JSON.stringify(result.structuredContent.result), new RegExp(entry.id));
+			}
+		});
+	});
 	await t.test("derives tool schemas and parses arguments before invoking the typed handler", async () => {
 		const valid = await run({ action: "tool", args: { name: "  example  " } });
 		assert.deepEqual(valid.result, { name: "example", count: 2, executionId: "test-execution" });
@@ -3419,6 +3435,7 @@ function createConciergeHarness(debugEnabled, secrets = {}) {
 					compatibility_date: "2026-07-15",
 					main: "./tests/fixtures/reliability-worker.mjs",
 					name: "reliability-test",
+					compatibility_flags: ["nodejs_compat"],
 				},
 			},
 			{

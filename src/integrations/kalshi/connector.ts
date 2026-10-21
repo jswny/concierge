@@ -7,6 +7,14 @@ import { UsageLog } from "../../usage-logging";
 import { ConnectorError, ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
 import { apiRequestSchema } from "../../connector-inputs";
 import { defineConnectorTool } from "../../connector-tools";
+import { defineConnector } from "../../connector-definition";
+
+export const kalshiConnector = defineConnector({
+	id: "kalshi",
+	label: "Kalshi",
+	hint: "Use kalshi.request for authenticated Kalshi prediction-market odds, bid/ask quotes, order books, market rules and account balances, positions, orders and fills. Native /trade-api/v2/ REST requests; server-owned key scopes determine access. No GET-only restriction: write-capable keys can perform financial transactions. No WebSockets or background monitoring.",
+	create: ({ ctx, env, requests, usage }) => new KalshiConnector(ctx, env, requests, usage),
+});
 
 const API_ORIGIN = "https://external-api.kalshi.com";
 const API_PREFIX = "/trade-api/v2/";
@@ -26,7 +34,7 @@ export class KalshiConnector extends ObservedConnector<Env> {
 		super(ctx, env, usage);
 	}
 
-	name() { return "kalshi"; }
+	name() { return kalshiConnector.id; }
 
 	protected instructions() {
 		return [
@@ -56,7 +64,7 @@ export class KalshiConnector extends ObservedConnector<Env> {
 					const sensitiveValues = [this.env.KALSHI_API_KEY_ID, this.env.KALSHI_PRIVATE_KEY].filter(Boolean);
 
 					return this.requests.request({
-						connector: "Kalshi", operation: "request", readOnly: options.method === "GET",
+						connector: kalshiConnector.label, operation: "request", readOnly: options.method === "GET",
 						url, method: options.method,
 						headers: async () => this.signedHeaders(options.method, url.pathname, sensitiveValues),
 						body: options.body === undefined ? undefined : JSON.stringify(options.body),

@@ -6,6 +6,14 @@ import { UsageLog } from "../../usage-logging";
 import { ConnectorRequests, createApiUrl, type ApiFailure, type ApiPayload } from "../../connector-requests";
 import { apiRequestSchema, apiScalarSchema } from "../../connector-inputs";
 import { defineConnectorTool } from "../../connector-tools";
+import { defineConnector } from "../../connector-definition";
+
+export const twilioConnector = defineConnector({
+	id: "twilio",
+	label: "Twilio",
+	hint: "Use twilio.request for core Twilio REST API access: send SMS/MMS, read incoming/outgoing message history and delivery status, manage voice calls, phone numbers, and usage. Native account-scoped .json paths and form parameters; credentials are server-owned. Writes can incur charges. When inbound webhooks are configured, event-capable clients can separately subscribe to twilio.message.received through MCP Events. No personal iMessage history or binary media delivery.",
+	create: ({ ctx, env, requests, usage }) => new TwilioConnector(ctx, env, requests, usage),
+});
 
 const API_ORIGIN = "https://api.twilio.com";
 const API_PREFIX = "/2010-04-01/Accounts/";
@@ -26,7 +34,7 @@ export class TwilioConnector extends ObservedConnector<Env> {
 		super(ctx, env, usage);
 	}
 
-	name() { return "twilio"; }
+	name() { return twilioConnector.id; }
 
 	protected instructions() {
 		return [
@@ -77,7 +85,7 @@ export class TwilioConnector extends ObservedConnector<Env> {
 					if (body) headers.set("Content-Type", "application/x-www-form-urlencoded");
 
 					return this.requests.request({
-						connector: "Twilio",
+						connector: twilioConnector.label,
 						operation: "request",
 						readOnly: options.method === "GET",
 						url,

@@ -82,7 +82,9 @@
 			"TWILIO_API_KEY_SECRET",
 			"TWILIO_WEBHOOK_KEY_ID",
 			"TWILIO_WEBHOOK_KEY_SECRET",
-			"EXA_API_KEY"
+			"EXA_API_KEY",
+			"KALSHI_API_KEY_ID",
+			"KALSHI_PRIVATE_KEY"
 		]
 	},
 	"upload_source_maps": true

@@ -22,6 +22,7 @@ const MCP_ICONS = [
 ];
 
 const GOOGLE_KEYS = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const KALSHI_KEYS = generateKeyPairSync("ed25519");
 const ACCESS_ISSUER = "https://access.example/cdn-cgi/access/sso/oidc/test-access-client";
 
 const GOOGLE_CREDENTIALS = {
@@ -47,6 +48,8 @@ const TEST_SECRETS = {
 	TWILIO_WEBHOOK_KEY_ID: `webhooks_sharedkey_${"a".repeat(26)}`,
 	TWILIO_WEBHOOK_KEY_SECRET: "test-twilio-webhook-secret",
 	EXA_API_KEY: "test-exa-api-key",
+	KALSHI_API_KEY_ID: "test-kalshi-key-id",
+	KALSHI_PRIVATE_KEY: KALSHI_KEYS.privateKey.export({ type: "pkcs8", format: "pem" }),
 };
 
 const debugServer = createConciergeHarness(true);
@@ -842,7 +845,7 @@ test("serves the code tool over the modern MCP protocol", async () => {
 			const connectorSection = (tool.description ?? "").split("## Available connectors\n")[1]?.split("\n## ")[0];
 			assert.ok(connectorSection);
 
-			for (const name of ["cloudflare", "google", "maps", "unifi", "twilio", "exa"]) {
+			for (const name of ["cloudflare", "google", "maps", "unifi", "twilio", "exa", "kalshi"]) {
 				assert.match(connectorSection, new RegExp("- `" + name + "`"));
 			}
 
@@ -1706,6 +1709,265 @@ test("Exa fails clearly before dispatch when its API key is missing", async () =
 		assert.match(result.content[0].text, /EXA_API_KEY is not configured/);
 		assert.equal(calls, 0);
 	} finally { globalThis.fetch = originalFetch; await client.close(); await harness.close(); }
+});
+
+test("Kalshi discovers authenticated market/account access and preserves native requests and responses", async () => {
+	const originalFetch = globalThis.fetch;
+
+	const cases = [
+		{ options: { method: "GET", path: "/trade-api/v2/markets", query: { status: "open", limit: 1, cursor: "native+cursor", tickers: ["TEST-A", "TEST-B"] } },
+			payload: { markets: [{ ticker: "TEST-A", yes_bid_dollars: "0.5300", yes_ask_dollars: "0.5700", volume_fp: "1234.00", rules_primary: "Fixture rules", future: { native: true } }], cursor: "next+cursor" } },
+		{ options: { method: "GET", path: "/trade-api/v2/markets/TEST-A/orderbook", query: { depth: 2 } }, payload: { orderbook_fp: { yes_dollars: [["0.5300", "2.00"]], no_dollars: [["0.4300", "4.00"]] } } },
+		{ options: { method: "GET", path: "/trade-api/v2/portfolio/balance" }, payload: { balance: 12345, portfolio_value: 6789 } },
+		{ options: { method: "GET", path: "/trade-api/v2/portfolio/positions" }, payload: { market_positions: [{ ticker: "TEST-A", position_fp: "2.00" }], cursor: "" } },
+		{ options: { method: "POST", path: "/trade-api/v2/portfolio/orders", body: { ticker: "TEST-A", client_order_id: "fixture-order" } }, payload: { order: { order_id: "fixture-order", status: "resting" } } },
+		{ options: { method: "PUT", path: "/trade-api/v2/portfolio/subaccounts/netting", body: { enabled: true, subaccount_number: 1 } }, payload: { updated: true } },
+		{ options: { method: "PATCH", path: "/trade-api/v2/portfolio/orders/fixture-order", body: { count_fp: "2.00" } }, payload: { order_id: "fixture-order" } },
+		{ options: { method: "DELETE", path: "/trade-api/v2/portfolio/orders/fixture-order" }, payload: null },
+	];
+
+	let current;
+	let calls = 0;
+	let dispatchFailure;
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		const url = new URL(request.url);
+
+		if (url.hostname !== "external-api.kalshi.com") return originalFetch(input, init);
+		calls++;
+
+		try {
+			assert.equal(request.method, current.options.method);
+			assert.equal(url.pathname, current.options.path);
+			assert.equal(request.headers.get("Accept"), "application/json");
+			assert.equal(request.headers.get("Authorization"), null);
+			assert.equal(request.headers.get("KALSHI-ACCESS-KEY"), TEST_SECRETS.KALSHI_API_KEY_ID);
+			const timestamp = request.headers.get("KALSHI-ACCESS-TIMESTAMP");
+			assert.match(timestamp, /^\d{13}$/);
+			assert.ok(Math.abs(Date.now() - Number(timestamp)) < 5000);
+			const message = timestamp + request.method + url.pathname;
+			const signature = Buffer.from(request.headers.get("KALSHI-ACCESS-SIGNATURE"), "base64");
+			assert.ok(verify(null, Buffer.from(message), KALSHI_KEYS.publicKey, signature));
+			assert.equal(verify(null, Buffer.from(message + "?incorrect=query"), KALSHI_KEYS.publicKey, signature), false);
+
+			for (const [key, value] of Object.entries(current.options.query ?? {})) {
+				assert.deepEqual(url.searchParams.getAll(key), [value].flat().map(String));
+			}
+
+			if (current.options.body === undefined) assert.equal(await request.text(), "");
+			else assert.deepEqual(await request.json(), current.options.body);
+		} catch (cause) { dispatchFailure = cause; throw cause; }
+
+		return current.payload === null ? new Response(null, { status: 204 }) : Response.json(current.payload);
+	};
+
+	try {
+		await withMcpClient(undefined, async (client) => {
+			const matches = await client.callTool({ name: "code", arguments: { code: "async () => await codemode.search('Kalshi prediction market odds')" } });
+			assert.equal(matches.isError, undefined);
+			assert.equal(matches.structuredContent.result.results[0].path, "kalshi.request");
+			const described = await client.callTool({ name: "code", arguments: { code: "async () => await codemode.describe('kalshi.request')" } });
+			assert.equal(described.isError, undefined);
+			assert.match(JSON.stringify(described), /key scopes|Key scopes/);
+			assert.doesNotMatch(JSON.stringify(described), /test-kalshi-key-id|BEGIN PRIVATE KEY/);
+
+			for (current of cases) {
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await kalshi.request(${JSON.stringify(current.options)})` } });
+
+				if (dispatchFailure) throw dispatchFailure;
+				assert.equal(result.isError, undefined, JSON.stringify(result));
+				assert.deepEqual(result.structuredContent.result, current.payload);
+				assert.deepEqual(JSON.parse(result.content[0].text), current.payload);
+			}
+
+			assert.equal(calls, cases.length);
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("Kalshi rejects credential overrides, origin escapes, key-management calls and invalid inputs before dispatch", async () => {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		if (new URL(new Request(input, init).url).hostname !== "external-api.kalshi.com") return originalFetch(input, init);
+		calls++;
+
+		return Response.json({ unexpected: true });
+	};
+
+	try {
+		await withMcpClient(undefined, async (client) => {
+			for (const override of [
+				{ method: "OPTIONS" }, { method: "get" }, { body: {} }, { headers: { "KALSHI-ACCESS-KEY": "override" } },
+				{ keyId: "override" }, { privateKey: "override" }, { scopes: ["write"] }, { url: "https://evil.example/" },
+				{ query: { access_token: "override" } }, { query: { limit: Infinity } },
+				...["https://evil.example/trade-api/v2/markets", "https://external-api.kalshi.com/trade-api/v2/markets",
+					"/trade-api/v2/../../escape", "/trade-api/v2/%2e%2e/escape", "/trade-api/v2//markets",
+					"/trade-api/v2/markets?limit=1", "/trade-api/v2/markets#fragment", "/trade-api/v2/markets%2fother",
+					"/trade-api/v2/api_keys", "/trade-api/v2/api_keys/generate", "/trade-api/v2/%61pi_keys",
+					"/trade-api/v2/%2561pi_keys"].map((path) => ({ path })),
+			]) {
+				const options = { method: "GET", path: "/trade-api/v2/markets", ...override };
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await kalshi.request(${JSON.stringify(options)})` } });
+				assert.equal(result.isError, true, JSON.stringify(override));
+			}
+
+			assert.equal(calls, 0);
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("Kalshi signs with Ed25519 PEM, including escaped newlines", async (t) => {
+	const edPem = TEST_SECRETS.KALSHI_PRIVATE_KEY;
+
+	const variants = [
+		{ name: "Ed25519 PKCS8", pem: edPem },
+		{ name: "Ed25519 escaped newlines", pem: edPem.replaceAll("\n", "\\n") },
+	];
+
+	for (const variant of variants) await t.test(variant.name, async () => {
+		const harness = createConciergeHarness(true, { KALSHI_PRIVATE_KEY: variant.pem });
+		const originalFetch = globalThis.fetch;
+		let verified = false;
+		globalThis.fetch = async (input, init) => {
+			const request = new Request(input, init);
+			const url = new URL(request.url);
+
+			if (url.hostname !== "external-api.kalshi.com") return originalFetch(input, init);
+			const message = request.headers.get("KALSHI-ACCESS-TIMESTAMP") + request.method + url.pathname;
+			verified = verify(null, Buffer.from(message), KALSHI_KEYS.publicKey, Buffer.from(request.headers.get("KALSHI-ACCESS-SIGNATURE"), "base64"));
+
+			return Response.json({ verified });
+		};
+
+		try {
+			await harness.listen();
+			await withMcpClient(undefined, async (client) => {
+				const result = await client.callTool({ name: "code", arguments: { code: "async () => await kalshi.request({ method: 'GET', path: '/trade-api/v2/portfolio/balance', query: { subaccount: 1 } })" } });
+				assert.equal(result.isError, undefined, JSON.stringify(result));
+				assert.equal(verified, true);
+			}, harness);
+		} finally { globalThis.fetch = originalFetch; await harness.close(); }
+	});
+});
+
+test("Kalshi refreshes signatures on read retries and never replays mutations", async () => {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	let status = 503;
+	let recover = true;
+	const timestamps = [];
+	const signatures = [];
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+
+		if (new URL(request.url).hostname !== "external-api.kalshi.com") return originalFetch(input, init);
+		calls++;
+		timestamps.push(request.headers.get("KALSHI-ACCESS-TIMESTAMP"));
+		signatures.push(request.headers.get("KALSHI-ACCESS-SIGNATURE"));
+
+		if (recover && calls === 2) return Response.json({ ok: true });
+
+		return Response.json({ code: "fixture_code", message: `${TEST_SECRETS.KALSHI_API_KEY_ID} ${TEST_SECRETS.KALSHI_PRIVATE_KEY} ${signatures.at(-1)}` },
+			{ status, headers: { "Retry-After": "0" } });
+	};
+
+	try {
+		await withMcpClient(undefined, async (client) => {
+			const invoke = (method) => client.callTool({ name: "code", arguments: { code: `async () => await kalshi.request({ method: '${method}', path: '/trade-api/v2/portfolio/orders' })` } });
+			assert.equal((await invoke("GET")).isError, undefined);
+			assert.equal(calls, 2);
+			assert.ok(Number(timestamps[1]) > Number(timestamps[0]));
+			assert.notEqual(signatures[0], signatures[1]);
+			recover = false;
+
+			for (status of [400, 401, 403, 429, 503]) {
+				calls = 0;
+				const result = await invoke("POST");
+				assert.equal(result.isError, true);
+				assert.equal(calls, 1);
+				assert.match(result.content[0].text, new RegExp(`HTTP ${status}`));
+				assert.match(result.content[0].text, /safe_to_replay=false/);
+				assert.match(result.content[0].text, status === 503 ? /outcome=unknown/ : /outcome=rejected/);
+				assert.doesNotMatch(JSON.stringify(result), /test-kalshi-key-id|BEGIN PRIVATE KEY/);
+				assert.ok(!JSON.stringify(result).includes(signatures.at(-1)));
+			}
+
+			assert.doesNotMatch(JSON.stringify(debugServer.getLogs()), /test-kalshi-key-id|BEGIN PRIVATE KEY/);
+
+			for (const signature of signatures) assert.ok(!JSON.stringify(debugServer.getLogs()).includes(signature));
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("Kalshi rejects redirects and non-JSON successes without replaying completed writes", async () => {
+	const originalFetch = globalThis.fetch;
+	let mode = "redirect";
+	let calls = 0;
+	let leaked = false;
+	globalThis.fetch = async (input, init) => {
+		const url = new URL(new Request(input, init).url);
+
+		if (url.hostname === "evil.example") { leaked = true;
+
+ return Response.json({ unexpected: true }); }
+
+		if (url.hostname !== "external-api.kalshi.com") return originalFetch(input, init);
+		calls++;
+
+		if (mode === "redirect") return new Response(null, { status: 302, headers: { Location: "https://evil.example/credentials" } });
+
+		return new Response(mode === "json" ? "{" : "private-provider-data", { headers: { "Content-Type": mode === "json" ? "application/json" : "text/html; private=header" } });
+	};
+
+	try {
+		await withMcpClient(undefined, async (client) => {
+			for (mode of ["redirect", "html", "json"]) {
+				calls = 0;
+				const result = await client.callTool({ name: "code", arguments: { code: "async () => await kalshi.request({ method: 'POST', path: '/trade-api/v2/portfolio/orders', body: {} })" } });
+				assert.equal(result.isError, true);
+				assert.equal(calls, 1);
+				assert.match(result.content[0].text, mode === "redirect" ? /HTTP 302.*outcome=unknown/ : /outcome=succeeded/);
+				assert.doesNotMatch(JSON.stringify(result), /private-provider-data|private=header/);
+			}
+
+			assert.equal(leaked, false);
+		});
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("Kalshi fails before dispatch for missing, malformed or unsupported credentials", async () => {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		if (new URL(new Request(input, init).url).hostname !== "external-api.kalshi.com") return originalFetch(input, init);
+		calls++;
+
+		return Response.json({ unexpected: true });
+	};
+
+	try {
+		for (const credentials of [
+			{ KALSHI_API_KEY_ID: "" }, { KALSHI_PRIVATE_KEY: "" }, { KALSHI_API_KEY_ID: "bad\nheader" },
+			{ KALSHI_PRIVATE_KEY: "private-malformed-key" },
+			{ KALSHI_PRIVATE_KEY: GOOGLE_KEYS.privateKey.export({ type: "pkcs8", format: "pem" }) },
+			{ KALSHI_PRIVATE_KEY: KALSHI_KEYS.publicKey.export({ type: "spki", format: "pem" }) },
+		]) {
+			const harness = createConciergeHarness(true, credentials);
+
+			try {
+				await harness.listen();
+				await withMcpClient(undefined, async (client) => {
+					const result = await client.callTool({ name: "code", arguments: { code: "async () => await kalshi.request({ method: 'GET', path: '/trade-api/v2/markets' })" } });
+					assert.equal(result.isError, true);
+					assert.match(result.content[0].text, /KALSHI_API_KEY_ID.*KALSHI_PRIVATE_KEY/);
+					assert.doesNotMatch(JSON.stringify(result), /private-malformed-key|BEGIN PRIVATE KEY|bad.*header/);
+				}, harness);
+			} finally { await harness.close(); }
+		}
+
+		assert.equal(calls, 0);
+	} finally { globalThis.fetch = originalFetch; }
 });
 
 test("discovers Twilio and preserves native messages, form bodies, account paths and pagination", async () => {

@@ -19,6 +19,7 @@ import { MapsConnector } from "./integrations/maps/connector";
 import { UnifiConnector } from "./integrations/unifi/connector";
 import { TwilioConnector } from "./integrations/twilio/connector";
 import { ExaConnector } from "./integrations/exa/connector";
+import { KalshiConnector } from "./integrations/kalshi/connector";
 import { ConnectorRequests } from "./connector-requests";
 import { boundMcpRequest, MAX_CODE_CHARS } from "./mcp-requests";
 import { observeCodeExecution } from "./code-execution";
@@ -84,6 +85,7 @@ function createConciergeServer(
 			new UnifiConnector(ctx, env, requests, images, usage),
 			new TwilioConnector(ctx, env, requests, usage),
 			new ExaConnector(ctx, env, requests, usage),
+			new KalshiConnector(ctx, env, requests, usage),
 		],
 		ctx,
 		executor: new DynamicWorkerExecutor({ loader: env.LOADER }),
@@ -102,6 +104,8 @@ function createConciergeServer(
 				"Use twilio.request for core Twilio REST API access: send SMS/MMS, read incoming/outgoing message history and delivery status, manage voice calls, phone numbers, and usage. Native account-scoped .json paths and form parameters; credentials are server-owned. Writes can incur charges. When inbound webhooks are configured, event-capable clients can separately subscribe to twilio.message.received through MCP Events. No personal iMessage history or binary media delivery.",
 			exa:
 				"Use exa.request for external web search, research, page content extraction, highlights, similar links and cited answers through Exa AI's JSON API. Native request bodies and responses; credentials are server-owned. Requests can incur charges. No streaming, background polling or agent wakeups.",
+			kalshi:
+				"Use kalshi.request for authenticated Kalshi prediction-market odds, bid/ask quotes, order books, market rules and account balances, positions, orders and fills. Native /trade-api/v2/ REST requests; server-owned key scopes determine access. No GET-only restriction: write-capable keys can perform financial transactions. No WebSockets or background monitoring.",
 		},
 	}).description;
 

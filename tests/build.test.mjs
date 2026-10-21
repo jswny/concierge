@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { generateKeyPairSync, verify } from "node:crypto";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
@@ -38,6 +39,7 @@ test("Vite preserves the production configuration without enabling local debug",
 
 test("the Vite bundle runs MCP through the existing Durable Object and Worker Loader", async () => {
 	const output = JSON.parse(readFileSync(new URL("../dist/concierge/wrangler.json", import.meta.url), "utf8"));
+	const kalshiKeys = generateKeyPairSync("ed25519");
 
 	const harness = createTestHarness({
 		root: fileURLToPath(new URL("..", import.meta.url)),
@@ -52,6 +54,8 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 					TWILIO_API_KEY_SID: `SK${"b".repeat(32)}`,
 					TWILIO_API_KEY_SECRET: "build-twilio-secret",
 					TWILIO_WEBHOOK_KEY_ID: `webhooks_sharedkey_${"a".repeat(26)}`,
+					KALSHI_API_KEY_ID: "build-kalshi-key-id",
+					KALSHI_PRIVATE_KEY: kalshiKeys.privateKey.export({ format: "pem", type: "pkcs8" }),
 				},
 			},
 			{
@@ -68,6 +72,16 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
 		const url = new URL(request.url);
+
+		if (url.hostname === "external-api.kalshi.com") {
+			assert.equal(request.headers.get("KALSHI-ACCESS-KEY"), "build-kalshi-key-id");
+			assert.equal(request.method, "GET");
+			assert.equal(url.pathname, "/trade-api/v2/portfolio/balance");
+			const message = request.headers.get("KALSHI-ACCESS-TIMESTAMP") + request.method + url.pathname;
+			assert.ok(verify(null, Buffer.from(message), kalshiKeys.publicKey, Buffer.from(request.headers.get("KALSHI-ACCESS-SIGNATURE"), "base64")));
+
+			return Response.json({ balance: 12345, portfolio_value: 5678, updated_ts: 1234567890 });
+		}
 
 		if (url.hostname === "api.twilio.com") {
 			assert.equal(request.headers.get("Authorization"), `Basic ${Buffer.from(`SK${"b".repeat(32)}:build-twilio-secret`).toString("base64")}`);
@@ -131,6 +145,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		assert.match(tools[0].description, /- `unifi`.*unifi\.request/);
 		assert.match(tools[0].description, /- `twilio`.*twilio\.request/);
 		assert.match(tools[0].description, /- `exa`.*exa\.request/);
+		assert.match(tools[0].description, /- `kalshi`.*kalshi\.request/);
 		assert.doesNotMatch(tools[0].description, /notion/i);
 		assert.match(tools[0].description, /search for `maps directions`/);
 
@@ -140,7 +155,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 
 		assert.equal(result.isError, undefined);
 		assert.equal(result.structuredContent.result.sum, 4);
-		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["cloudflare.read_webpage_as_markdown", "exa.request", "google.request", "maps.request", "twilio.request", "unifi.request"]);
+		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["cloudflare.read_webpage_as_markdown", "exa.request", "google.request", "kalshi.request", "maps.request", "twilio.request", "unifi.request"]);
 
 		const page = await client.callTool({ name: "code", arguments: {
 			code: "async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/test' })",
@@ -175,6 +190,13 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 
 		assert.equal(search.isError, undefined, JSON.stringify(search));
 		assert.deepEqual(search.structuredContent.result, { requestId: "exa-build", results: [{ url: "https://example.com", title: "Example" }] });
+
+		const balance = await client.callTool({ name: "code", arguments: {
+			code: "async () => await kalshi.request({ method: 'GET', path: '/trade-api/v2/portfolio/balance' })",
+		} });
+
+		assert.equal(balance.isError, undefined, JSON.stringify(balance));
+		assert.deepEqual(balance.structuredContent.result, { balance: 12345, portfolio_value: 5678, updated_ts: 1234567890 });
 	} finally {
 		globalThis.fetch = originalFetch;
 		await client.close();

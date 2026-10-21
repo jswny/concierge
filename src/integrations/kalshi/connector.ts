@@ -1,4 +1,3 @@
-import type { ConnectorTools } from "@cloudflare/codemode";
 import { createPrivateKey, sign, type KeyObject } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { z } from "zod";
@@ -7,7 +6,7 @@ import { UsageLog } from "../../usage-logging";
 import { ConnectorError, ConnectorRequests, type ApiFailure, type ApiPayload, type RequestAuthentication } from "../../connector-requests";
 import { ConnectorHttp } from "../../connector-http";
 import { apiRequestSchema } from "../../connector-inputs";
-import { defineConnectorTool } from "../../connector-tools";
+import { defineConnectorTool, type ConciergeTools } from "../../connector-tools";
 import { defineConnector } from "../../connector-definition";
 
 export const kalshiConnector = defineConnector({
@@ -48,7 +47,7 @@ export class KalshiConnector extends ObservedConnector<Env> {
 		].join(" ");
 	}
 
-	protected tools(): ConnectorTools {
+	protected tools(): ConciergeTools {
 		return {
 			request: defineConnectorTool({
 				schema: requestSchema,

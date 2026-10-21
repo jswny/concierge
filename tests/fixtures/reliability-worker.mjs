@@ -55,6 +55,7 @@ export default {
 
 			if (options.action === "tool") {
 				const tool = defineConnectorTool({
+					...options.metadata,
 					description: "Test inferred and validated tool arguments.",
 					schema: z.strictObject({ name: z.string().trim(), count: z.number().default(2) }),
 					execute: (args, context) => ({ ...args, executionId: context?.executionId }),

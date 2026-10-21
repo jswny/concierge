@@ -1,14 +1,18 @@
 import { CodemodeConnector, type ConnectorTool } from "@cloudflare/codemode";
 import { annotate, traceOperation } from "./code-execution";
 import { UsageLog } from "./usage-logging";
+import { assertSupportedTool, type ConciergeTools } from "./connector-tools";
 
 export abstract class ObservedConnector<E> extends CodemodeConnector<E> {
+	protected abstract tools(): ConciergeTools | Promise<ConciergeTools>;
+
 	constructor(ctx: DurableObjectState, env: E, private readonly usage: UsageLog) {
 		super(ctx, env);
 	}
 
 	protected tool(name: string, tool: ConnectorTool): ConnectorTool {
 		const original = super.tool(name, tool);
+		assertSupportedTool(original);
 
 		return {
 			...original,

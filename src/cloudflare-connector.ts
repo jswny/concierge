@@ -1,10 +1,9 @@
-import type { ConnectorTools } from "@cloudflare/codemode";
 import { ObservedConnector } from "./observed-connector";
 import { UsageLog } from "./usage-logging";
 import { z } from "zod";
 import { ConnectorError, ConnectorRequests, type ApiFailure, type ApiPayload } from "./connector-requests";
 import { toToolInputSchema } from "./connector-inputs";
-import { defineConnectorTool } from "./connector-tools";
+import { defineConnectorTool, type ConciergeTools } from "./connector-tools";
 import { defineConnector } from "./connector-definition";
 
 export const cloudflareConnector = defineConnector({
@@ -69,7 +68,7 @@ export class CloudflareConnector extends ObservedConnector<Env> {
 		return "Use for Cloudflare platform capabilities available to this personal concierge server.";
 	}
 
-	protected tools(): ConnectorTools {
+	protected tools(): ConciergeTools {
 		return {
 			read_webpage_as_markdown: defineConnectorTool({
 				schema: markdownSchema,

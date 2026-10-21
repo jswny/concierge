@@ -3011,6 +3011,19 @@ test("shares bounded reliability behavior across connector operations", async (t
 			}
 		});
 	});
+	await t.test("rejects unsupported approval and rollback definitions before discovery or execution", async () => {
+		for (const metadata of [{ requiresApproval: true }, { requiresApproval: false }]) {
+			assert.match((await run({ action: "tool", metadata, args: { name: "test" } })).error, /approvals and rollback handlers are not supported/);
+		}
+
+		const fixture = debugServer.getWorker("mcp-infrastructure-test");
+
+		for (const describe of [true, false]) for (const metadata of [{ requiresApproval: true }, { requiresApproval: false }, { rollback: true }]) {
+			const result = await (await fixture.fetch("/", { method: "POST", body: JSON.stringify({ action: "unsupported-tool", describe, ...metadata }) })).json();
+			assert.match(result.error, /approvals and rollback handlers are not supported/);
+			assert.equal(result.calls, 0);
+		}
+	});
 	await t.test("derives tool schemas and parses arguments before invoking the typed handler", async () => {
 		const valid = await run({ action: "tool", args: { name: "  example  " } });
 		assert.deepEqual(valid.result, { name: "example", count: 2, executionId: "test-execution" });

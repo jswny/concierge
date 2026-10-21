@@ -5,14 +5,32 @@ import { ObservedConnector } from "../../src/observed-connector.ts";
 import { tracing } from "cloudflare:workers";
 
 class FixtureConnector extends ObservedConnector {
-	constructor(ctx, env, usage, handler) { super(ctx, env, usage); this.handler = handler; }
+	constructor(ctx, env, usage, handler, metadata = {}) { super(ctx, env, usage); this.handler = handler; this.metadata = metadata; }
 	name() { return "test"; }
-	tools() { return { request: { execute: this.handler } }; }
+	tools() { return { request: { ...this.metadata, execute: this.handler } }; }
 }
 
 export default {
 	async fetch(request, env, ctx) {
 		const options = await request.json();
+
+		if (options.action === "unsupported-tool") {
+			let calls = 0;
+			const metadata = options.rollback ? { revert: () => {} } : { requiresApproval: options.requiresApproval };
+
+			const connector = new FixtureConnector(ctx, env, new UsageLog(), () => { calls++;
+
+ return null; }, metadata);
+
+			try {
+				if (options.describe) await connector.describe();
+				else await connector.executeTool("request", {});
+
+				return Response.json({ calls });
+			} catch (error) {
+				return Response.json({ error: error.message, calls });
+			}
+		}
 
 		if (options.action === "ingress") {
 			// Generate rejected uploads inside workerd, not over the harness's HTTP socket.

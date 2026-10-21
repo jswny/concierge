@@ -1,4 +1,3 @@
-import type { ConnectorTools } from "@cloudflare/codemode";
 import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
 import { z } from "zod";
@@ -6,7 +5,7 @@ import { GoogleWorkspaceAuth } from "./auth";
 import { ConnectorRequests, type ApiFailure, type ApiPayload } from "../../connector-requests";
 import { ConnectorHttp } from "../../connector-http";
 import { apiRequestSchema } from "../../connector-inputs";
-import { defineConnectorTool } from "../../connector-tools";
+import { defineConnectorTool, type ConciergeTools } from "../../connector-tools";
 import { defineConnector } from "../../connector-definition";
 
 export const googleConnector = defineConnector({
@@ -63,7 +62,7 @@ export class GoogleConnector extends ObservedConnector<Env> {
 		].join(" ");
 	}
 
-	protected tools(): ConnectorTools {
+	protected tools(): ConciergeTools {
 		return {
 			request: defineConnectorTool({
 				schema: requestSchema,

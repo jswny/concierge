@@ -1,11 +1,10 @@
-import type { ConnectorTools } from "@cloudflare/codemode";
 import { z } from "zod";
 import { ObservedConnector } from "../../observed-connector";
 import { UsageLog } from "../../usage-logging";
 import { ConnectorRequests, type ApiFailure, type ApiPayload } from "../../connector-requests";
 import { ConnectorHttp } from "../../connector-http";
 import { apiRequestSchema } from "../../connector-inputs";
-import { defineConnectorTool } from "../../connector-tools";
+import { defineConnectorTool, type ConciergeTools } from "../../connector-tools";
 import { ConnectorImages, isConnectorImage } from "../../connector-images";
 import { RESPONSE_TYPES } from "../../response-formats";
 import { defineConnector } from "../../connector-definition";
@@ -50,7 +49,7 @@ export class UnifiConnector extends ObservedConnector<Env> {
 		].join(" ");
 	}
 
-	protected tools(): ConnectorTools {
+	protected tools(): ConciergeTools {
 		return {
 			request: defineConnectorTool({
 				schema: requestSchema,

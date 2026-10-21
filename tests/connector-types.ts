@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { apiRequestSchema, apiQueryValueSchema, type QueryValue } from "../src/connector-inputs";
-import { defineConnectorTool } from "../src/connector-tools";
+import { defineConnectorTool, type ConciergeTool } from "../src/connector-tools";
 import type { ConnectorId } from "../src/connectors";
 import type { RequestAuthentication } from "../src/connector-requests";
 
@@ -14,6 +14,22 @@ export type ConnectorIdsAreLiteral = Assert<Equal<ConnectorId, "cloudflare" | "g
 const incompleteAuthentication: RequestAuthentication = { headers: { Authorization: "Bearer test" } };
 
 void incompleteAuthentication;
+
+const approvalTool: ConciergeTool = {
+	execute: () => null,
+	// @ts-expect-error Concierge does not expose approval/resume controls.
+	requiresApproval: true,
+};
+
+const rollbackTool: ConciergeTool = {
+	execute: () => null,
+	// @ts-expect-error Concierge does not expose rollback controls.
+	revert: () => {},
+};
+
+void approvalTool;
+
+void rollbackTool;
 
 const limitedRequest = apiRequestSchema({ methods: ["GET", "POST"], pathPrefix: "/" });
 

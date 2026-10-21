@@ -1,12 +1,12 @@
 import type { ConnectorImage } from "./connector-images";
 import { z } from "zod";
-import { apiScalarSchema } from "./connector-inputs";
+import { apiScalarSchema, type HttpMethod, type QueryValue } from "./connector-inputs";
 import { parseJson, type JsonValue } from "./json";
 import {
 	RESPONSE_TYPES, parseMediaType, responseAccept, responseTypeFor, supportedResponseTypes, type ResponseFormat,
 } from "./response-formats";
 
-export type QueryValue = boolean | number | string | Array<boolean | number | string>;
+export type { QueryValue } from "./connector-inputs";
 
 export type ApiPayload = JsonValue | ConnectorImage;
 
@@ -74,7 +74,7 @@ type ResponseOptions = Pick<HttpRequest, "format" | "sensitive" | "sensitiveValu
 
 type HttpRequest = Operation & {
 	url: URL;
-	method?: string;
+	method?: HttpMethod;
 	body?: BodyInit | (() => Promise<BodyInit>);
 	headers?: HeadersInit | (() => Promise<HeadersInit>);
 	format?: ResponseFormat;

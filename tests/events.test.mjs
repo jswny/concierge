@@ -15,7 +15,7 @@ const FROM = "+12025550102";
 const WEBHOOK = "https://concierge.j1.io/webhooks/twilio/messages";
 const secret = () => `whsec_${randomBytes(32).toString("base64")}`;
 const message = (overrides = {}) => ({ AccountSid: ACCOUNT, MessageSid: `SM${randomBytes(16).toString("hex")}`, From: FROM, To: TO, Body: "A private incoming fixture message", NumMedia: "0", ...overrides });
-const params = (url, signingKey = secret(), args = { To: TO }) => ({ name: "twilio.message.received", arguments: args, delivery: { mode: "webhook", url, secret: signingKey } });
+const params = (url, signingKey = secret(), args = {}) => ({ name: "twilio.message.received", arguments: args, delivery: { mode: "webhook", url, secret: signingKey } });
 const harness = createTestHarness({
 	root: fileURLToPath(new URL("..", import.meta.url)),
 	workers: [{
@@ -75,7 +75,9 @@ test("MCP Events discovers native filters separately from tools and stays OAuth-
 	const listed = await rpc("events/list");
 	assert.equal(listed.result.events[0].name, "twilio.message.received");
 	assert.deepEqual(listed.result.events[0].delivery, ["webhook"]);
-	assert.deepEqual(listed.result.events[0].inputSchema.required, ["To"]);
+	assert.deepEqual(listed.result.events[0].inputSchema.required ?? [], []);
+	assert.deepEqual(Object.keys(listed.result.events[0].inputSchema.properties).sort(), ["From", "To"]);
+	assert.match(listed.result.events[0].description, /empty arguments/);
 	assert.match(listed.result.events[0].description, /untrusted data/);
 	assert.deepEqual((await rpc("tools/list")).result.tools.map(({ name }) => name), ["code"]);
 	for (const method of ["events/list", "events/subscribe", "events/unsubscribe"]) assert.equal((await rpc(method, {}, "/mcp")).status, 401);
@@ -173,6 +175,45 @@ test("one signing key and endpoint support independent subscriptions for multipl
 	}
 });
 
+test("empty and sender-only subscriptions receive matching messages across destination numbers", async () => {
+	const original = globalThis.fetch;
+	const deliveries = [];
+	const subscriptions = [
+		params("https://receiver.example.com/all-messages"),
+		params("https://receiver.example.com/from-only", secret(), { From: FROM }),
+	];
+	const messages = [
+		message(),
+		message({ To: "+12025550103" }),
+		message({ From: "+12025550104" }),
+		message({ To: "+12025550103", From: "+12025550104" }),
+	];
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		const subscription = subscriptions.find((item) => item.delivery.url === request.url);
+		assert.ok(subscription);
+		const event = new Webhook(subscription.delivery.secret).verify(await request.text(), Object.fromEntries(request.headers));
+		if (event.type === "verification") return Response.json({ challenge: event.challenge });
+		deliveries.push({ url: request.url, messageSid: event.data.MessageSid });
+		return new Response(null, { status: 204 });
+	};
+	try {
+		for (const subscription of subscriptions) assert.equal((await rpc("events/subscribe", subscription)).error, undefined);
+		for (const fields of messages) assert.equal((await incoming(fields)).status, 200);
+		await eventually(() => deliveries.length === 6);
+		for (const [index, subscription] of subscriptions.entries()) {
+			assert.deepEqual(deliveries.filter((item) => item.url === subscription.delivery.url).map((item) => item.messageSid).sort(),
+				messages.filter((item) => index === 0 || item.From === FROM).map((item) => item.MessageSid).sort());
+		}
+	} finally {
+		for (const subscription of subscriptions) {
+			const { secret: _, ...delivery } = subscription.delivery;
+			await rpc("events/unsubscribe", { ...subscription, delivery });
+		}
+		globalThis.fetch = original;
+	}
+});
+
 test("rejects unknown events, invalid filters, secrets, non-public callbacks and failed challenges", async () => {
 	const original = globalThis.fetch;
 	let requests = 0;
@@ -184,6 +225,9 @@ test("rejects unknown events, invalid filters, secrets, non-public callbacks and
 		assert.equal((await rpc("events/subscribe", { ...params("https://receiver.example.com/invalid"), name: "unknown" })).error.code, -32011);
 		assert.equal((await rpc("events/subscribe", params("https://receiver.example.com/invalid", "bad-secret"))).error.code, -32602);
 		assert.equal((await rpc("events/subscribe", params("https://receiver.example.com/invalid", secret(), { To: TO, apiKey: "not-allowed" }))).error.code, -32602);
+		for (const args of [{ To: "not-a-number" }, { From: "not-a-number" }, { To: "" }, { To: null }]) {
+			assert.equal((await rpc("events/subscribe", params("https://receiver.example.com/invalid", secret(), args))).error.code, -32602);
+		}
 		assert.equal(requests, 0);
 		assert.equal((await rpc("events/subscribe", params("https://receiver.example.com/invalid"))).error.code, -32015);
 		assert.equal(requests, 1);

@@ -363,7 +363,7 @@ async function testCimdAuthorization(authMethod) {
 			return response.json();
 		};
 		assert.equal((await eventRequest("events/list")).result.events[0].name, "twilio.message.received");
-		const subscription = { name: "twilio.message.received", arguments: { To: "+12025550101" }, delivery: { mode: "webhook", url: `https://events-client.example.com/${authMethod}`, secret: `whsec_${randomBytes(32).toString("base64")}` } };
+		const subscription = { name: "twilio.message.received", arguments: {}, delivery: { mode: "webhook", url: `https://events-client.example.com/${authMethod}`, secret: `whsec_${randomBytes(32).toString("base64")}` } };
 		const subscribed = await eventRequest("events/subscribe", subscription);
 		assert.equal(subscribed.error, undefined, JSON.stringify(subscribed.error));
 		assert.match(subscribed.result.id, /^sub_/);

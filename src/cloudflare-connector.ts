@@ -20,7 +20,9 @@ const markdownSchema = z.strictObject({
 	contentHash: z.string().regex(/^[a-f0-9]{64}$/).optional()
 		.describe("Previous SHA-256 contentHash; reject the read if the freshly rendered page has changed."),
 });
+
 const markdownInputSchema = toToolInputSchema(markdownSchema);
+
 const markdownOutputSchema = toToolInputSchema(z.strictObject({
 	requestedUrl: z.string(),
 	finalUrl: z.string().nullable(),
@@ -58,38 +60,54 @@ export class CloudflareConnector extends ObservedConnector<Env> {
 				replay: "reexecute",
 				execute: async (args) => {
 					const { url, waitUntil, waitForSelector, offset = 0, maxChars = 12_000, contentHash } = markdownSchema.parse(args);
+
 					if (offset > 0 && !contentHash) throw new Error("Continuation reads require the preceding contentHash.");
 					const parsedUrl = new URL(url);
+
 					if (!["http:", "https:"].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password) throw new Error("Only public HTTP and HTTPS URLs without credentials are supported.");
+
 					return this.requests.run({ connector: "Cloudflare", operation: "read_webpage_as_markdown", readOnly: true, timeoutMs: 45_000 }, async (attempt) => {
 						const budget = Math.max(1, attempt.remainingMs() - 1_000);
 						const actionTimeout = Math.max(1, Math.min(5_000, Math.floor(budget / 5)));
 						const selectorTimeout = waitForSelector ? Math.max(1, Math.min(waitForSelector.timeout ?? 10_000, Math.floor(budget / 3))) : 0;
-						attempt.dispatch();
-						const response = await this.env.BROWSER.quickAction("markdown", {
+
+						const browserOptions: Parameters<Env["BROWSER"]["quickAction"]>[1] = {
 							url: parsedUrl.toString(),
 							cacheTTL: 0,
 							bestAttempt: false,
 							actionTimeout,
 							gotoOptions: { waitUntil: waitUntil ?? "networkidle2", timeout: Math.max(1, Math.min(30_000, budget - actionTimeout - selectorTimeout)) },
-							...(waitForSelector ? { waitForSelector: { selector: waitForSelector.selector, visible: true, timeout: selectorTimeout } } : {}),
-						});
+						};
+
+						if (waitForSelector) browserOptions.waitForSelector = { selector: waitForSelector.selector, visible: true, timeout: selectorTimeout };
+						attempt.dispatch();
+						const response = await this.env.BROWSER.quickAction("markdown", browserOptions);
 						const payload = await this.requests.responsePayload(response, attempt, { classifyError: classifyBrowserError });
+
 						if (isRecord(payload) && payload.success === false) throw this.requests.httpError(response, payload, { classifyError: classifyBrowserError });
+
 						if (!isRecord(payload) || payload.success !== true || typeof payload.result !== "string") throw new ConnectorError({ category: "invalid_response", message: "Browser Run returned an invalid Markdown response." });
 						const meta = isRecord(payload.meta) ? payload.meta : {};
 						const status = typeof meta.status === "number" && Number.isInteger(meta.status) && meta.status >= 100 && meta.status <= 599 ? meta.status : null;
+
 						if (status !== null && status >= 400) throw new ConnectorError({ category: "http", status, message: `The webpage origin returned HTTP ${status}; its content was not retrieved.` });
 						const title = typeof meta.title === "string" ? meta.title.slice(0, 1_000) : null;
+
 						if (!payload.result.trim()) throw new ConnectorError({ category: "invalid_response", message: "The rendered webpage contains no readable Markdown. It may need a loading selector or authentication." });
+
 						if (isBlockedPage(title, payload.result)) throw new ConnectorError({ category: "permission", message: "The webpage appears to require login or a browser challenge; its content was not retrieved." });
 						const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload.result));
 						const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+
 						if (contentHash && contentHash !== hash) throw new ConnectorError({ category: "invalid_response", message: "The webpage changed between reads. Restart from offset 0 instead of combining different versions." });
+
 						if (offset >= payload.result.length) throw new Error("The offset is beyond the rendered Markdown; restart from offset 0.");
+
 						if (/[\uDC00-\uDFFF]/.test(payload.result[offset])) throw new Error("Use nextOffset from the preceding read, not an offset inside a Unicode character.");
 						let end = Math.min(payload.result.length, offset + maxChars);
+
 						if (end < payload.result.length && /[\uDC00-\uDFFF]/.test(payload.result[end])) end--;
+
 						const page = {
 							requestedUrl: parsedUrl.toString(),
 							finalUrl: typeof meta.finalUrl === "string" ? meta.finalUrl.slice(0, 4_000) : null,
@@ -103,16 +121,21 @@ export class CloudflareConnector extends ObservedConnector<Env> {
 							truncated: offset > 0 || end < payload.result.length,
 							contentHash: hash,
 						};
+
 						// Bound the entire object below Code Mode's budget, including escaped source metadata.
 						while (JSON.stringify(page).length > 20_000) {
 							end = offset + Math.floor((end - offset) / 2);
+
 							if (end < payload.result.length && /[\uDC00-\uDFFF]/.test(payload.result[end])) end--;
+
 							if (end <= offset) throw new ConnectorError({ category: "response_too_large", message: "Webpage source metadata exceeds the output budget." });
 							page.markdown = payload.result.slice(offset, end);
 							page.nextOffset = end < payload.result.length ? end : null;
 							page.truncated = offset > 0 || end < payload.result.length;
 						}
+
 						attempt.succeeded();
+
 						return page;
 					});
 				},
@@ -123,13 +146,16 @@ export class CloudflareConnector extends ObservedConnector<Env> {
 
 function isBlockedPage(title: string | null, markdown: string) {
 	const gateTitle = /^(?:just a moment[.!]*|access denied|verify (?:that )?you are human|sign in|log in|login)(?:\s*[|:-].*)?$/i;
+
 	if (title && gateTitle.test(title.trim())) return true;
+
 	// Match explicit gate messages at the start, not incidental mentions in an article.
 	return /^(?:#\s*)?(?:checking your browser|verify (?:that )?you are human|enable javascript and cookies to continue|please (?:sign|log) in to continue)\b/i.test(markdown.trimStart());
 }
 
 function classifyBrowserError(_status: number, payload: unknown): ApiFailure {
 	const error = isRecord(payload) && Array.isArray(payload.errors) && isRecord(payload.errors[0]) ? payload.errors[0] : {};
+
 	return {
 		message: typeof error.message === "string" ? error.message : undefined,
 		code: typeof error.code === "number" ? String(error.code) : undefined,

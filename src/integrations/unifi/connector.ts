@@ -8,11 +8,13 @@ import { RESPONSE_TYPES } from "../../response-formats";
 
 const API_ORIGIN = "https://api.ui.com";
 const PROXY_PATH = /^\/v1\/connector\/consoles\/[^/]+\/proxy\/(network|protect)\/integration\/v1\//;
+
 const requestSchema = apiRequestSchema({
 	methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
 	pathPrefix: "/v1/",
 	queryArrays: true,
 });
+
 const requestInputSchema = toToolInputSchema(requestSchema);
 
 export class UnifiConnector extends ObservedConnector<Env> {
@@ -44,14 +46,18 @@ export class UnifiConnector extends ObservedConnector<Env> {
 				execute: async (args, execution) => {
 					const options = parseApiRequest(requestSchema, args);
 					const url = createApiUrl(API_ORIGIN, "/v1/", options.path, options.query);
+
 					// The cloud proxy must not become an escape hatch into console-internal APIs.
 					if (/%25/i.test(options.path) || url.pathname.includes("//")) {
 						throw new Error("UniFi paths cannot contain double encoding or empty path segments.");
 					}
+
 					if ((url.pathname === "/v1/connector" || url.pathname.startsWith("/v1/connector/")) && !PROXY_PATH.test(url.pathname)) {
 						throw new Error("UniFi cloud proxy paths must target the Network or Protect integration/v1 API.");
 					}
+
 					if (!this.env.UNIFI_API_KEY) throw new Error("UNIFI_API_KEY is not configured.");
+
 					const result = await this.requests.request({
 						connector: "UniFi",
 						operation: "request",
@@ -63,8 +69,11 @@ export class UnifiConnector extends ObservedConnector<Env> {
 						body: options.body === undefined ? undefined : JSON.stringify(options.body),
 						classifyError: classifyUnifiError,
 					});
+
 					if (!isConnectorImage(result)) return result;
+
 					if (!execution) throw new Error("Image retrieval requires a Code Mode invocation.");
+
 					return this.images.capture(execution.executionId, result);
 				},
 			},
@@ -74,11 +83,18 @@ export class UnifiConnector extends ObservedConnector<Env> {
 
 function classifyUnifiError(status: number, payload: unknown): ApiFailure {
 	const error = isRecord(payload) ? payload : {};
-	return {
+
+	const failure: ApiFailure = {
 		message: typeof error.message === "string" ? error.message : undefined,
 		code: typeof error.code === "string" ? error.code : undefined,
 		requestId: typeof error.traceId === "string" ? error.traceId : undefined,
-		// A proxy timeout does not prove that the console rejected a mutation.
-		...(status === 408 ? { retryable: true, outcome: "unknown" } as const : {}),
 	};
+
+	// A proxy timeout does not prove that the console rejected a mutation.
+	if (status === 408) {
+		failure.retryable = true;
+		failure.outcome = "unknown";
+	}
+
+	return failure;
 }

@@ -10,6 +10,7 @@ test("Vite preserves the production configuration without enabling local debug",
 	// Match JSON output serialization, which omits undefined optional fields.
 	const input = JSON.parse(JSON.stringify(unstable_readConfig({ config: "wrangler.jsonc" }, { redirect: false })));
 	const output = JSON.parse(readFileSync(new URL("../dist/concierge/wrangler.json", import.meta.url), "utf8"));
+
 	for (const key of [
 		"name", "account_id", "compatibility_date", "compatibility_flags",
 		"routes", "workers_dev", "preview_urls", "triggers",
@@ -18,14 +19,17 @@ test("Vite preserves the production configuration without enabling local debug",
 	]) {
 		assert.deepEqual(output[key], input[key], key);
 	}
+
 	assert.deepEqual(output.vars, input.vars);
 	const { directory: inputAssetDirectory, ...inputAssets } = input.assets;
 	const { directory: outputAssetDirectory, ...outputAssets } = output.assets;
 	assert.deepEqual(outputAssets, inputAssets);
+
 	for (const extension of ["svg", "png"]) {
 		assert.deepEqual(readFileSync(new URL(`${outputAssetDirectory}/assets/concierge.${extension}`, new URL("../dist/concierge/", import.meta.url))),
 			readFileSync(new URL(`${inputAssetDirectory}/assets/concierge.${extension}`, new URL("../", import.meta.url))));
 	}
+
 	assert.notEqual(output.vars.CONCIERGE_DEBUG, "true");
 	assert.equal(output.main, "index.js");
 	assert.equal(output.no_bundle, true);
@@ -34,6 +38,7 @@ test("Vite preserves the production configuration without enabling local debug",
 
 test("the Vite bundle runs MCP through the existing Durable Object and Worker Loader", async () => {
 	const output = JSON.parse(readFileSync(new URL("../dist/concierge/wrangler.json", import.meta.url), "utf8"));
+
 	const harness = createTestHarness({
 		root: fileURLToPath(new URL("..", import.meta.url)),
 		workers: [
@@ -54,27 +59,36 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 			},
 		],
 	});
+
 	const client = new Client({ name: "concierge-build-test", version: "1" }, {
 		versionNegotiation: { mode: { pin: "2026-07-28" } },
 	});
+
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
 		const url = new URL(request.url);
+
 		if (url.hostname === "api.twilio.com") {
 			assert.equal(request.headers.get("Authorization"), `Basic ${Buffer.from(`SK${"b".repeat(32)}:build-twilio-secret`).toString("base64")}`);
 			assert.equal(url.pathname, `/2010-04-01/Accounts/AC${"a".repeat(32)}/Messages.json`);
+
 			return Response.json({ messages: [{ sid: "SMbuild", status: "received" }], next_page_uri: null });
 		}
+
 		if (url.hostname === "api.exa.ai") {
 			assert.equal(request.headers.get("Authorization"), "Bearer unused-build-test-secret");
 			assert.equal(url.pathname, "/search");
 			assert.deepEqual(await request.json(), { query: "fixture", numResults: 1 });
+
 			return Response.json({ requestId: "exa-build", results: [{ url: "https://example.com", title: "Example" }] });
 		}
+
 		if (url.hostname !== "api.ui.com") return originalFetch(input, init);
+
 		return new Response(Buffer.from(JPEG_BASE64, "base64"), { headers: { "Content-Type": "image/jpeg" } });
 	};
+
 	try {
 		const listener = await harness.listen();
 		const worker = harness.getWorker("concierge");
@@ -92,6 +106,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 			fetch: (input, init) => worker.fetch(input, init),
 		}));
 		assert.equal(client.getNegotiatedProtocolVersion(), "2026-07-28");
+
 		// The stock SDK client strips draft capability keys; check the wire response.
 		const eventDiscovery = await worker.fetch(new URL("/debug/mcp", listener.url), {
 			method: "POST",
@@ -102,6 +117,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 				"io.modelcontextprotocol/clientCapabilities": {},
 			} } }),
 		});
+
 		assert.deepEqual((await eventDiscovery.json()).result.capabilities.events, { listChanged: false });
 		const tools = (await client.listTools()).tools;
 		assert.deepEqual(tools.map((tool) => tool.name), ["code"]);
@@ -117,36 +133,46 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		assert.match(tools[0].description, /- `exa`.*exa\.request/);
 		assert.doesNotMatch(tools[0].description, /notion/i);
 		assert.match(tools[0].description, /search for `maps directions`/);
+
 		const result = await client.callTool({ name: "code", arguments: {
 			code: "async () => ({ sum: 2 + 2, matches: await codemode.search('request') })",
 		} });
+
 		assert.equal(result.isError, undefined);
 		assert.equal(result.structuredContent.result.sum, 4);
 		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["cloudflare.read_webpage_as_markdown", "exa.request", "google.request", "maps.request", "twilio.request", "unifi.request"]);
+
 		const page = await client.callTool({ name: "code", arguments: {
 			code: "async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/test' })",
 		} });
+
 		assert.equal(page.isError, undefined);
 		assert.equal(page.structuredContent.result.status, 200);
 		assert.equal(page.structuredContent.result.finalUrl, "https://example.com/final");
 		assert.match(page.structuredContent.result.markdown, /Wait: networkidle2/);
+
 		const image = await client.callTool({ name: "code", arguments: {
 			code: "async () => ({ snapshot: await unifi.request({ method: 'GET', path: '/v1/connector/consoles/id/proxy/protect/integration/v1/cameras/camera-id/snapshot' }) })",
 		} });
+
 		assert.equal(image.isError, undefined);
 		assert.deepEqual(image.content[1], { type: "image", mimeType: "image/jpeg", data: JPEG_BASE64 });
 		assert.deepEqual(image.structuredContent.result.snapshot, {
 			type: "image", mimeType: "image/jpeg", byteLength: Buffer.from(JPEG_BASE64, "base64").length, contentIndex: 1,
 		});
 		assert.deepEqual(JSON.parse(image.content[0].text), image.structuredContent.result);
+
 		const messages = await client.callTool({ name: "code", arguments: {
 			code: "async () => await twilio.request({ method: 'GET', path: '/2010-04-01/Accounts/{AccountSid}/Messages.json', query: { PageSize: 1 } })",
 		} });
+
 		assert.equal(messages.isError, undefined, JSON.stringify(messages));
 		assert.deepEqual(messages.structuredContent.result, { messages: [{ sid: "SMbuild", status: "received" }], next_page_uri: null });
+
 		const search = await client.callTool({ name: "code", arguments: {
 			code: "async () => await exa.request({ method: 'POST', path: '/search', body: { query: 'fixture', numResults: 1 } })",
 		} });
+
 		assert.equal(search.isError, undefined, JSON.stringify(search));
 		assert.deepEqual(search.structuredContent.result, { requestId: "exa-build", results: [{ url: "https://example.com", title: "Example" }] });
 	} finally {

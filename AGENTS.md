@@ -80,6 +80,13 @@ Concierge provides personal agents, such as ChatGPT and Codex, with pre-authenti
 - Make capabilities and limitations discoverable in method descriptions, not only connector-level instructions. Keep connector hints and MCP annotations aligned with actual support; distinguish API access from external-content search and interactive browsing.
 - Keep integration tests credential-free and repeatable, covering native request/response behavior, credential isolation, and failure handling. Use a live read-only MCP call to verify real credentials and provider setup when available; do not treat mocks as proof of production access.
 
+### Code Quality
+
+- Enforce the applicable generic rules from [anti-slop](https://github.com/dmmulroy/anti-slop) with `npm run lint`; lint also gates `npm run build` and CI. The vendored plugin, licenses, exact revision, and update policy live in `tools/oxlint/anti-slop/UPSTREAM.md`; enabled rules live in `oxlint.config.ts`. Keep `oxlint` and `@oxlint/plugins` pinned to the same version.
+- Preserve known types with inference or `satisfies`; do not widen values just to assert them back. Avoid chained assertions and reflective access/invocation. Each necessary non-const assertion needs a nearby `SAFETY:` comment explaining the actual invariant, not restating the cast.
+- Avoid copying growing accumulators, redundant eager array passes, conditional empty-object spreads, module mocking, and vague locally owned `shape` names. Preserve callback ordering and property-omission semantics when changing existing code. Keep readable spacing between logical blocks.
+- Effect rules do not apply. The blanket bans on runtime `typeof`, `unknown` parameters/returns, and open dictionary types are deliberately excluded: Concierge handles untrusted JSON and generic API/Code Mode results. Keep schema validation at owned boundaries and do not replace `unknown` with `any` or fabricated types to satisfy lint.
+
 ### Implementation Guidance
 
 - Preserve the vendored C3 block above unless intentionally refreshing it from a newly generated Create Cloudflare scaffold.

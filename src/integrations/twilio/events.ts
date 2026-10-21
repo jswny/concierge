@@ -2,10 +2,12 @@ import { z } from "zod";
 import { eventDescriptorSchema, type EventSource } from "../../mcp-events/protocol";
 
 const phone = z.string().regex(/^\+[1-9]\d{1,14}$/);
+
 const filters = z.strictObject({
 	To: phone.optional().describe("Optional Twilio destination number in E.164 format. Omit to monitor all numbers routed to Concierge."),
 	From: phone.optional().describe("Optional sender number, in E.164 format."),
 });
+
 export const messagePayload = z.strictObject({
 	AccountSid: z.string().regex(/^AC[0-9a-f]{32}$/i),
 	MessageSid: z.string().regex(/^SM[0-9a-f]{32}$/i),
@@ -14,8 +16,11 @@ export const messagePayload = z.strictObject({
 	Body: z.string().max(32_000),
 	NumMedia: z.string().regex(/^\d{1,3}$/),
 });
+
 export type IncomingMessage = z.infer<typeof messagePayload>;
+
 export const MESSAGE_EVENT = "twilio.message.received";
+
 export const twilioMessageEvents: EventSource = {
 	definition: {
 		name: MESSAGE_EVENT,

@@ -10,15 +10,24 @@ export class EventFixture extends DurableObject {
 	async run(input) {
 		const owner = { userId: "owner", clientId: "client", grantId: "grant", expiresAt: Date.now() + 3600_000, ...input.owner };
 		const service = this.service();
+
 		if (input.action === "subscribe") return service.subscribe(subscribeParams.parse(input.params), owner);
+
 		if (input.action === "unsubscribe") return service.unsubscribe(unsubscribeParams.parse(input.params), owner);
-		if (input.action === "publish") { await service.publish(MESSAGE_EVENT, input.message.MessageSid, input.message); return {}; }
+
+		if (input.action === "publish") { await service.publish(MESSAGE_EVENT, input.message.MessageSid, input.message);
+
+ return {}; }
+
 		if (input.action === "expire") this.ctx.storage.sql.exec("UPDATE mcp_event_subscriptions SET expires = 0");
+
 		if (input.action === "revoke") this.authorized = false;
+
 		if (input.action === "deliver") {
 			this.ctx.storage.sql.exec("UPDATE mcp_event_deliveries SET next_attempt = 0");
 			await service.alarm();
 		}
+
 		return {
 			subscriptions: this.ctx.storage.sql.exec("SELECT * FROM mcp_event_subscriptions").toArray(),
 			jobs: this.ctx.storage.sql.exec("SELECT * FROM mcp_event_deliveries").toArray(),
@@ -31,6 +40,7 @@ export class EventFixture extends DurableObject {
 export default {
 	async fetch(request, env) {
 		const input = await request.json();
+
 		try { return Response.json(await env.EVENTS.getByName(input.instance ?? "default").run(input)); }
 		catch (error) { return Response.json({ error: error.message, code: error.code }); }
 	},

@@ -14,18 +14,22 @@ const JPEG = Buffer.from(JPEG_BASE64, "base64");
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const MODERN_PROTOCOL_VERSION = "2026-07-28";
 const LEGACY_PROTOCOL_VERSION = "2025-11-25";
+
 const MCP_ICONS = [
 	{ src: "https://concierge.j1.io/assets/concierge.png", mimeType: "image/png", sizes: ["256x256"] },
 	{ src: "https://concierge.j1.io/assets/concierge.svg", mimeType: "image/svg+xml", sizes: ["any"] },
 ];
+
 const GOOGLE_KEYS = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const ACCESS_ISSUER = "https://access.example/cdn-cgi/access/sso/oidc/test-access-client";
+
 const GOOGLE_CREDENTIALS = {
 	type: "service_account",
 	client_email: "concierge@j1-concierge.iam.gserviceaccount.com",
 	private_key_id: "test-google-key-id",
 	private_key: GOOGLE_KEYS.privateKey.export({ type: "pkcs8", format: "pem" }),
 };
+
 const TEST_SECRETS = {
 	ACCESS_AUTHORIZATION_URL: `${ACCESS_ISSUER}/authorization`,
 	ACCESS_CLIENT_ID: "test-access-client",
@@ -66,6 +70,7 @@ test("keeps the production MCP route behind OAuth", async () => {
 		"https://concierge.j1.io/mcp",
 		mcpInitializeRequest(),
 	);
+
 	assert.equal(mcpResponse.status, 401);
 	assert.match(mcpResponse.headers.get("WWW-Authenticate") ?? "", /resource_metadata=/);
 	assert.equal(await mcpResponse.text(), "");
@@ -73,6 +78,7 @@ test("keeps the production MCP route behind OAuth", async () => {
 	const registrationResponse = await productionServer.fetch("/register", {
 		method: "POST",
 	});
+
 	assert.equal(registrationResponse.status, 404);
 });
 
@@ -80,6 +86,7 @@ test("advertises CIMD without dynamic client registration", async () => {
 	const authorizationResponse = await productionServer.getWorker("concierge").fetch(
 		"https://concierge.j1.io/.well-known/oauth-authorization-server",
 	);
+
 	assert.equal(authorizationResponse.status, 200);
 	const authorizationMetadata = await authorizationResponse.json();
 	assert.equal(authorizationMetadata.client_id_metadata_document_supported, true);
@@ -93,6 +100,7 @@ test("advertises CIMD without dynamic client registration", async () => {
 	const resourceResponse = await productionServer.getWorker("concierge").fetch(
 		"https://concierge.j1.io/.well-known/oauth-protected-resource/mcp",
 	);
+
 	assert.equal(resourceResponse.status, 200);
 	const resourceMetadata = await resourceResponse.json();
 	assert.equal(resourceMetadata.resource, "https://concierge.j1.io/mcp");
@@ -118,6 +126,7 @@ test("serves only the public logo assets without OAuth", async () => {
 	assert.equal(png.readUInt32BE(16), 256);
 	assert.equal(png.readUInt32BE(20), 256);
 	assert.ok(png.length <= 10_000, "PNG must fit ChatGPT's 10 kB upload limit.");
+
 	for (const path of ["/assets/concierge.svg", "/assets/concierge.png"]) {
 		const head = await productionServer.fetch(path, { method: "HEAD" });
 		assert.equal(head.status, 200);
@@ -125,13 +134,16 @@ test("serves only the public logo assets without OAuth", async () => {
 		const post = await productionServer.fetch(path, { method: "POST" });
 		assert.ok([404, 405].includes(post.status));
 	}
+
 	for (const path of ["/assets/missing.svg", "/assets/", "/assets/../src/index.ts"]) {
 		assert.equal((await productionServer.fetch(path)).status, 404, path);
 	}
 });
 
 test("authorizes a CIMD public client through Access and refreshes its MCP token", () => testCimdAuthorization("none"));
+
 test("authenticates a CIMD private_key_jwt client and rejects invalid or replayed assertions", () => testCimdAuthorization("private_key_jwt"));
+
 test("allows CIMD authentication choices without downgrading invalid assertions to none", () => testCimdAuthorization("choice"));
 
 async function testCimdAuthorization(authMethod) {
@@ -141,22 +153,28 @@ async function testCimdAuthorization(authMethod) {
 	const verifier = randomBytes(32).toString("base64url");
 	const clientKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
 	const tokenEndpoint = "https://concierge.j1.io/token";
+
 	function clientAssertion(claims = {}, key = clientKeys.privateKey) {
 		const now = Math.floor(Date.now() / 1000);
+
 		const data = [{ alg: "RS256", kid: "client-key" }, {
 			iss: clientId, sub: clientId, aud: tokenEndpoint,
 			iat: now, exp: now + 300, jti: randomBytes(16).toString("hex"), ...claims,
 		}].map((part) => Buffer.from(JSON.stringify(part)).toString("base64url")).join(".");
+
 		return `${data}.${sign("RSA-SHA256", Buffer.from(data), key).toString("base64url")}`;
 	}
+
 	function clientAuthentication(assertion) {
 		return signedClient ? {
 			client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
 			client_assertion: assertion,
 		} : { client_secret: "", client_assertion_type: "", client_assertion: "" };
 	}
+
 	const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 	const header = Buffer.from(JSON.stringify({ alg: "RS256", kid: "test-key" })).toString("base64url");
+
 	const claims = Buffer.from(JSON.stringify({
 		aud: TEST_SECRETS.ACCESS_CLIENT_ID,
 		email: "test@example.com",
@@ -166,41 +184,52 @@ async function testCimdAuthorization(authMethod) {
 		name: "Test User",
 		sub: "test-user",
 	})).toString("base64url");
+
 	const tokenData = `${header}.${claims}`;
 	const idToken = `${tokenData}.${sign("RSA-SHA256", Buffer.from(tokenData), privateKey).toString("base64url")}`;
 	const originalFetch = globalThis.fetch;
 	let upstreamTokenRequest;
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
+
 		if (request.url === clientId) {
 			assert.match(request.headers.get("User-Agent") ?? "", /^workers-oauth-provider\//);
-			return Response.json({
+
+			const metadata = {
 				client_id: clientId,
 				client_name: "Test MCP Client",
 				grant_types: ["authorization_code", "refresh_token"],
 				redirect_uris: [redirectUri, "https://client.example/other-callback"],
 				response_types: ["code"],
 				token_endpoint_auth_method: authMethod === "choice" ? "none" : authMethod,
-				...(authMethod === "choice" ? { token_endpoint_auth_methods_supported: ["none", "private_key_jwt"] } : {}),
-				...(signedClient ? {
-					jwks: { keys: [{ ...clientKeys.publicKey.export({ format: "jwk" }), kid: "client-key", alg: "RS256", use: "sig" }] },
-				} : {}),
-			});
+			};
+
+			if (authMethod === "choice") metadata.token_endpoint_auth_methods_supported = ["none", "private_key_jwt"];
+
+			if (signedClient) metadata.jwks = { keys: [{ ...clientKeys.publicKey.export({ format: "jwk" }), kid: "client-key", alg: "RS256", use: "sig" }] };
+
+			return Response.json(metadata);
 		}
+
 		if (request.url === TEST_SECRETS.ACCESS_TOKEN_URL) {
 			upstreamTokenRequest = new URLSearchParams(await request.text());
+
 			return Response.json({ access_token: "test-upstream-token", token_type: "Bearer", id_token: idToken });
 		}
+
 		if (request.url === TEST_SECRETS.ACCESS_JWKS_URL) {
 			return Response.json({ keys: [{ ...publicKey.export({ format: "jwk" }), kid: "test-key" }] });
 		}
+
 		if (new URL(request.url).hostname === "events-client.example.com") {
 			return Response.json({ challenge: (await request.json()).challenge });
 		}
+
 		return originalFetch(input, init);
 	};
 
 	const worker = productionServer.getWorker("concierge");
+
 	try {
 		const authorizeUrl = new URL("https://concierge.j1.io/authorize");
 		authorizeUrl.search = new URLSearchParams({
@@ -223,41 +252,54 @@ async function testCimdAuthorization(authMethod) {
 		assert.match(consent.headers.get("Set-Cookie"), /Secure/);
 		assert.match(consent.headers.get("Set-Cookie"), /HttpOnly/);
 		const consentCookies = responseCookies(consent);
+
 		for (const cookie of ["", consentCookies.replace(/=.*/, "=wrong-browser")]) {
 			const unbound = await worker.fetch("https://concierge.j1.io/authorize", {
 				method: "POST", redirect: "manual", headers: { Cookie: cookie }, body: form,
 			});
+
 			assert.equal(unbound.status, 400);
 		}
+
 		// Extra form fields must never override the server-stored authorization request.
 		form.set("state", "forged-state");
 		form.set("redirect_uri", "https://evil.example/callback");
+
 		const approval = await worker.fetch("https://concierge.j1.io/authorize", {
 			method: "POST",
 			redirect: "manual",
 			headers: { Cookie: consentCookies },
 			body: form,
 		});
+
 		assert.equal(approval.status, 302);
+
 		const replayedApproval = await worker.fetch("https://concierge.j1.io/authorize", {
 			method: "POST", redirect: "manual", headers: { Cookie: consentCookies }, body: form,
 		});
+
 		assert.equal(replayedApproval.status, 400);
 		const approvalCookies = responseCookies(approval);
+
 		const remembered = await worker.fetch(authorizeUrl, {
 			redirect: "manual", headers: { Cookie: approvalCookies },
 		});
+
 		assert.equal(remembered.status, 302);
 		assert.equal(new URL(remembered.headers.get("Location")).origin, "https://access.example");
+
 		const tamperedRemembered = await worker.fetch(authorizeUrl, {
 			redirect: "manual", headers: { Cookie: approvalCookies.replace(/(__Host-oauth-approvals=)[^;]+/, "$1tampered") },
 		});
+
 		assert.equal(tamperedRemembered.status, 200);
 		const changedRedirect = new URL(authorizeUrl);
 		changedRedirect.searchParams.set("redirect_uri", "https://client.example/other-callback");
+
 		const newConsent = await worker.fetch(changedRedirect, {
 			redirect: "manual", headers: { Cookie: approvalCookies },
 		});
+
 		assert.equal(newConsent.status, 200);
 		const changedScope = new URL(authorizeUrl);
 		changedScope.searchParams.set("scope", "new-permission");
@@ -274,13 +316,17 @@ async function testCimdAuthorization(authMethod) {
 		const unboundCallback = await worker.fetch(callbackUrl, { redirect: "manual" });
 		assert.equal(unboundCallback.status, 400);
 		assert.equal(upstreamTokenRequest, undefined);
+
 		const callback = await worker.fetch(callbackUrl, {
 			redirect: "manual", headers: { Cookie: approvalCookies },
 		});
+
 		assert.equal(callback.status, 302);
+
 		const replayedCallback = await worker.fetch(callbackUrl, {
 			redirect: "manual", headers: { Cookie: approvalCookies },
 		});
+
 		assert.equal(replayedCallback.status, 400);
 		assert.equal(upstreamTokenRequest.get("code"), "test-access-code");
 		assert.equal(upstreamTokenRequest.get("client_id"), TEST_SECRETS.ACCESS_CLIENT_ID);
@@ -294,6 +340,7 @@ async function testCimdAuthorization(authMethod) {
 		const clientCallback = new URL(callback.headers.get("Location"));
 		assert.equal(clientCallback.origin, "https://client.example");
 		assert.equal(clientCallback.searchParams.get("state"), "test-client-state");
+
 		const exchangeBody = {
 			client_id: clientId,
 			code: clientCallback.searchParams.get("code"),
@@ -302,6 +349,7 @@ async function testCimdAuthorization(authMethod) {
 			redirect_uri: redirectUri,
 			resource: "https://concierge.j1.io/mcp",
 		};
+
 		if (signedClient) {
 			for (const assertion of [
 				...(authMethod === "private_key_jwt" ? [undefined] : []),
@@ -310,23 +358,32 @@ async function testCimdAuthorization(authMethod) {
 				clientAssertion({ exp: Math.floor(Date.now() / 1000) - 120 }),
 				clientAssertion({}, privateKey),
 			]) {
+				const rejectedBody = { ...exchangeBody };
+
+				if (assertion) Object.assign(rejectedBody, clientAuthentication(assertion));
+
 				const rejected = await worker.fetch(tokenEndpoint, {
 					method: "POST",
-					body: new URLSearchParams({ ...exchangeBody, ...(assertion ? clientAuthentication(assertion) : {}) }),
+					body: new URLSearchParams(rejectedBody),
 				});
+
 				assert.equal(rejected.status, 401);
 				assert.equal((await rejected.json()).error, "invalid_client");
 			}
 		}
+
 		const assertion = clientAssertion();
+
 		const exchange = await worker.fetch(tokenEndpoint, {
 			method: "POST",
 			body: new URLSearchParams({ ...exchangeBody, ...clientAuthentication(assertion) }),
 		});
+
 		assert.equal(exchange.status, 200);
 		const tokens = await exchange.json();
 		assert.equal(typeof tokens.access_token, "string");
 		assert.equal(typeof tokens.refresh_token, "string");
+
 		if (signedClient) {
 			const replay = await worker.fetch(tokenEndpoint, {
 				method: "POST",
@@ -335,9 +392,11 @@ async function testCimdAuthorization(authMethod) {
 					...clientAuthentication(assertion),
 				}),
 			});
+
 			assert.equal(replay.status, 401);
 			assert.equal((await replay.json()).error, "invalid_client");
 		}
+
 		const refresh = await worker.fetch("https://concierge.j1.io/token", {
 			method: "POST",
 			body: new URLSearchParams({
@@ -347,8 +406,10 @@ async function testCimdAuthorization(authMethod) {
 				...clientAuthentication(clientAssertion()),
 			}),
 		});
+
 		assert.equal(refresh.status, 200);
 		const refreshed = await refresh.json();
+
 		const eventRequest = async (method, params = {}) => {
 			const response = await worker.fetch("https://concierge.j1.io/mcp", {
 				method: "POST",
@@ -359,9 +420,12 @@ async function testCimdAuthorization(authMethod) {
 					"io.modelcontextprotocol/clientCapabilities": {},
 				} } }),
 			});
+
 			assert.equal(response.status, 200);
+
 			return response.json();
 		};
+
 		assert.equal((await eventRequest("events/list")).result.events[0].name, "twilio.message.received");
 		const subscription = { name: "twilio.message.received", arguments: {}, delivery: { mode: "webhook", url: `https://events-client.example.com/${authMethod}`, secret: `whsec_${randomBytes(32).toString("base64")}` } };
 		const subscribed = await eventRequest("events/subscribe", subscription);
@@ -370,6 +434,7 @@ async function testCimdAuthorization(authMethod) {
 		const { secret: _eventSecret, ...eventDelivery } = subscription.delivery;
 		assert.equal((await eventRequest("events/unsubscribe", { ...subscription, delivery: eventDelivery })).error, undefined);
 		const client = new Client({ name: "authenticated-test", version: "1.0.0" });
+
 		try {
 			await client.connect(new StreamableHTTPClientTransport(new URL("https://concierge.j1.io/mcp"), {
 				fetch: (input, init) => worker.fetch(input, init),
@@ -392,11 +457,13 @@ test("validates Access OAuth responses and ID tokens before issuing MCP authoriz
 	const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 	const wrongKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey;
 	const now = Math.floor(Date.now() / 1000);
+
 	const validClaims = {
 		iss: ACCESS_ISSUER, aud: TEST_SECRETS.ACCESS_CLIENT_ID,
 		sub: "test-user", iat: now, exp: now + 300,
 		email: "do-not-expose@example.com",
 	};
+
 	const cases = [
 		{ name: "accepts a valid ID token", claims: {}, accepted: true },
 		{ name: "accepts the sole trusted audience in an array with matching azp", claims: { aud: [TEST_SECRETS.ACCESS_CLIENT_ID], azp: TEST_SECRETS.ACCESS_CLIENT_ID }, accepted: true },
@@ -443,6 +510,7 @@ test("validates Access OAuth responses and ID tokens before issuing MCP authoriz
 		{ name: "does not follow token endpoint redirects", tokenStatus: 302 },
 		{ name: "does not follow JWKS endpoint redirects", jwksRedirect: true },
 	];
+
 	let idToken;
 	let currentExample;
 	let exchangeCount = 0;
@@ -450,33 +518,47 @@ test("validates Access OAuth responses and ID tokens before issuing MCP authoriz
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
+
 		if (request.url === clientId) {
 			return Response.json({ client_id: clientId, client_name: "Identity Test Client", redirect_uris: [redirectUri], response_types: ["code"], token_endpoint_auth_method: "none" });
 		}
+
 		if (request.url === TEST_SECRETS.ACCESS_TOKEN_URL) {
 			exchangeCount++;
+
 			if (currentExample.rawTokenBody) return new Response(currentExample.rawTokenBody, { headers: { "Content-Type": "application/json" } });
+
 			if (currentExample.tokenStatus === 302) return new Response(null, { status: 302, headers: { Location: "https://untrusted.example/oauth" } });
+
 			return Response.json({ access_token: "do-not-expose-upstream-token", token_type: "Bearer", id_token: idToken, ...currentExample.tokenFields }, { status: currentExample.tokenStatus ?? 200 });
 		}
+
 		if (request.url === TEST_SECRETS.ACCESS_JWKS_URL) {
 			if (currentExample.jwksRedirect) return new Response(null, { status: 302, headers: { Location: "https://untrusted.example/jwks" } });
+
 			return Response.json({ keys: [{ ...publicKey.export({ format: "jwk" }), kid: "identity-test-key", alg: "RS256", use: "sig" }] });
 		}
+
 		if (new URL(request.url).hostname === "untrusted.example") {
 			redirectedRequests++;
+
 			return Response.json({});
 		}
+
 		return originalFetch(input, init);
 	};
+
 	try {
 		for (const example of cases) {
 			await t.test(example.name, async () => {
 				currentExample = example;
 				const header = { alg: "RS256", kid: "identity-test-key", ...example.header };
+
 				if (example.unsigned) header.alg = "none";
+
 				const data = [header, { ...validClaims, ...example.claims }]
 					.map((part) => Buffer.from(JSON.stringify(part)).toString("base64url")).join(".");
+
 				const signature = example.unsigned ? "" : sign(header.alg === "RS384" ? "RSA-SHA384" : "RSA-SHA256", Buffer.from(data), example.key ?? privateKey).toString("base64url");
 				idToken = example.token ?? `${data}.${signature}`;
 				const authorizeUrl = new URL("https://concierge.j1.io/authorize");
@@ -488,19 +570,23 @@ test("validates Access OAuth responses and ID tokens before issuing MCP authoriz
 				}).toString();
 				const consent = await worker.fetch(authorizeUrl);
 				assert.equal(consent.status, 200, consent.status === 200 ? undefined : await consent.text());
+
 				const approval = await worker.fetch("https://concierge.j1.io/authorize", {
 					method: "POST", redirect: "manual", headers: { Cookie: responseCookies(consent) },
 					body: consentForm(await consent.text(), "approve"),
 				});
+
 				assert.equal(approval.status, 302);
 				const callbackUrl = new URL("https://concierge.j1.io/callback");
 				callbackUrl.search = new URLSearchParams({ code: "test-access-code", state: new URL(approval.headers.get("Location")).searchParams.get("state"), ...example.callback }).toString();
+
 				if (example.duplicateCode) callbackUrl.searchParams.append("code", "another-code");
 				const callbackOptions = { redirect: "manual", headers: { Cookie: responseCookies(approval) } };
 				const beforeExchange = exchangeCount;
 				const result = await worker.fetch(callbackUrl, callbackOptions);
 				assert.equal(exchangeCount - beforeExchange, example.noExchange ? 0 : 1);
 				assert.equal(redirectedRequests, 0);
+
 				if (example.accepted) {
 					assert.equal(result.status, 302);
 					const destination = new URL(result.headers.get("Location"));
@@ -529,6 +615,7 @@ test("handles consent denial, expired transactions, and independent upstream log
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
+
 		if (request.url === clientId) {
 			return Response.json({
 				client_id: clientId,
@@ -538,11 +625,14 @@ test("handles consent denial, expired transactions, and independent upstream log
 				token_endpoint_auth_method: "none",
 			});
 		}
+
 		if (request.url === TEST_SECRETS.ACCESS_TOKEN_URL) {
 			assert.fail("Denied or invalid callbacks must not exchange an Access code");
 		}
+
 		return originalFetch(input, init);
 	};
+
 	async function start(state) {
 		const url = new URL("https://concierge.j1.io/authorize");
 		url.search = new URLSearchParams({
@@ -556,14 +646,18 @@ test("handles consent denial, expired transactions, and independent upstream log
 		const html = await response.text();
 		assert.doesNotMatch(html, /<script>/);
 		assert.match(html, /&#60;script&#62;/);
+
 		return { form: consentForm(html, "approve"), cookie: responseCookies(response) };
 	}
+
 	async function submit(consent, decision) {
 		consent.form.set("decision", decision);
+
 		return worker.fetch("https://concierge.j1.io/authorize", {
 			method: "POST", redirect: "manual", headers: { Cookie: consent.cookie }, body: consent.form,
 		});
 	}
+
 	try {
 		const invalidRedirect = new URL("https://concierge.j1.io/authorize");
 		invalidRedirect.search = new URLSearchParams({
@@ -608,6 +702,7 @@ test("handles consent denial, expired transactions, and independent upstream log
 		assert.notEqual(first.cookie.split("=")[0], second.cookie.split("=")[0]);
 		const approvals = [await submit(first, "approve"), await submit(second, "approve")];
 		const cookies = approvals.map(responseCookies);
+
 		for (const [index, approval] of approvals.entries()) {
 			assert.equal(approval.status, 302);
 			const callback = new URL("https://concierge.j1.io/callback");
@@ -616,9 +711,11 @@ test("handles consent denial, expired transactions, and independent upstream log
 			assert.equal((await worker.fetch(callback, {
 				redirect: "manual", headers: { Cookie: cookies[1 - index] },
 			})).status, 400);
+
 			const result = await worker.fetch(callback, {
 				redirect: "manual", headers: { Cookie: cookies.join("; ") },
 			});
+
 			assert.equal(result.status, 302);
 			const clientCallback = new URL(result.headers.get("Location"));
 			assert.equal(clientCallback.searchParams.get("state"), index === 0 ? "first-state" : "second-state");
@@ -634,14 +731,17 @@ test("rejects untrusted MCP Host and Origin headers", async () => {
 		"http://evil.example/debug/mcp",
 		mcpInitializeRequest(),
 	);
+
 	assert.equal(badHostResponse.status, 403);
 	assert.match(await badHostResponse.text(), /Invalid Host/);
 
 	const worker = debugServer.getWorker("concierge");
+
 	const badOriginResponse = await worker.fetch(
 		"http://localhost/debug/mcp",
 		mcpInitializeRequest({ Origin: "https://evil.example" }),
 	);
+
 	assert.equal(badOriginResponse.status, 403);
 	assert.match(await badOriginResponse.text(), /Invalid Origin/);
 });
@@ -650,6 +750,7 @@ test("bounds streamed MCP bodies by actual bytes and cancels oversized input", a
 	const limit = 4 * 1024 * 1024;
 	const fixture = debugServer.getWorker("mcp-infrastructure-test");
 	const run = async (options) => (await fixture.fetch("/", { method: "POST", body: JSON.stringify(options) })).json();
+
 	for (const contentLength of [undefined, 1, "invalid"]) {
 		const result = await run({ chunks: [limit, 1, 10], contentLength });
 		assert.equal(result.status, 413);
@@ -657,10 +758,12 @@ test("bounds streamed MCP bodies by actual bytes and cancels oversized input", a
 		assert.equal(result.chunksRead, 2);
 		assert.match(result.error.error.message, /4194304 bytes/);
 	}
+
 	const announced = await run({ chunks: [1], contentLength: limit + 1 });
 	assert.equal(announced.status, 413);
 	assert.equal(announced.cancelled, true);
 	assert.equal(announced.chunksRead, 0);
+
 	for (const chunks of [[], [1, 2, 3], [limit]]) {
 		const result = await run({ chunks });
 		assert.equal(result.status, 200);
@@ -670,14 +773,17 @@ test("bounds streamed MCP bodies by actual bytes and cancels oversized input", a
 		assert.equal(result.method, "POST");
 		assert.equal(result.cancelled, false);
 	}
+
 	assert.equal((await run({ chunks: [1, 2], failAfterChunks: 1 })).error, "test body failure");
 });
 
 test("limits MCP ingress without bypassing OAuth or debug gating", async () => {
 	const limit = 4 * 1024 * 1024;
+
 	const run = async (options, server = debugServer) => (await server.getWorker("mcp-infrastructure-test").fetch("/", {
 		method: "POST", body: JSON.stringify({ action: "ingress", count: limit, ...options }),
 	})).json();
+
 	const response = await run({});
 	assert.equal(response.status, 413);
 	assert.equal(response.headers["access-control-allow-origin"], "*");
@@ -735,9 +841,11 @@ test("serves the code tool over the modern MCP protocol", async () => {
 			assert.match(tool.description ?? "", /codemode\.search.*connector method names/s);
 			const connectorSection = (tool.description ?? "").split("## Available connectors\n")[1]?.split("\n## ")[0];
 			assert.ok(connectorSection);
+
 			for (const name of ["cloudflare", "google", "maps", "unifi", "twilio", "exa"]) {
 				assert.match(connectorSection, new RegExp("- `" + name + "`"));
 			}
+
 			assert.match(connectorSection, /Routes API/);
 			assert.match(connectorSection, /JPEG camera snapshots/);
 			assert.doesNotMatch(tool.description ?? "", /notion/i);
@@ -758,12 +866,15 @@ test("serves the code tool over the modern MCP protocol", async () => {
 				readOnlyHint: false,
 			});
 			assert.deepEqual(tool.outputSchema?.required, ["result"]);
+
 			const discovery = await client.callTool({
 				name: "code",
 				arguments: { code: 'async () => await codemode.search("gmail email settings")' },
 			});
+
 			assert.equal(discovery.isError, undefined);
 			assert.equal(discovery.structuredContent.result.results[0].path, "google.request");
+
 			for (const query of ["maps directions", "google maps", "route distance", "business ratings"]) {
 				const matches = await client.callTool({ name: "code", arguments: { code: `async () => await codemode.search(${JSON.stringify(query)})` } });
 				assert.equal(matches.isError, undefined);
@@ -776,6 +887,7 @@ test("serves the code tool over the modern MCP protocol", async () => {
 					code: 'async () => ({ first: 1, second: "two" })',
 				},
 			});
+
 			assert.deepEqual(result.structuredContent, {
 				result: { first: 1, second: "two" },
 			});
@@ -803,6 +915,7 @@ test("retains legacy MCP compatibility", async () => {
 			name: "code",
 			arguments: { code: 'async () => "legacy"' },
 		});
+
 		assert.deepEqual(result.structuredContent, { result: "legacy" });
 	});
 });
@@ -835,9 +948,11 @@ test("does not promise unsupported change notifications to modern subscribers", 
 				},
 			}),
 		});
+
 		assert.equal(response.status, 200);
 		assert.match(response.headers.get("Content-Type"), /text\/event-stream/);
 		const reader = response.body.getReader();
+
 		try {
 			const { value } = await reader.read();
 			const frame = new TextDecoder().decode(value).split("\n").find((line) => line.startsWith("data:"));
@@ -881,23 +996,28 @@ test("records correlated operational metadata without source, results or excepti
 			assert.equal(result.isError, isError);
 		}
 	});
+
 	const events = await waitFor(() => {
 		const events = debugServer.getLogs().flatMap((log) => log.message ?? [])
 			.filter((message) => typeof message === "string" && message.startsWith('{"event":"code_execution"'))
 			.map((message) => JSON.parse(message));
+
 		return events.length >= 4 ? events : undefined;
 	}, "Code Mode execution telemetry");
+
 	const logs = debugServer.getLogs();
 	assert.equal(events.length, 4, JSON.stringify(logs));
 	assert.deepEqual(events.map((event) => event.status), ["completed", "error", "error", "completed"]);
 	assert.deepEqual(events.map((event) => event.connectorCalls), [0, 0, 0, 1]);
 	assert.deepEqual(events.map((event) => event.mcpStatus), ["success", "error", "error", "success"]);
 	assert.equal(new Set(events.map((event) => event.invocationId)).size, 4);
+
 	for (const event of events) {
 		assert.equal(typeof event.executionId, "string");
 		assert.ok(Number.isFinite(event.durationMs) && event.durationMs >= 0);
 		assert.deepEqual(Object.keys(event).sort(), ["event", "invocationId", "executionId", "durationMs", "status", "mcpStatus", "connectorCalls"].sort());
 	}
+
 	const usage = logs.flatMap((log) => log.message ?? []).filter((message) => typeof message === "string" && message.startsWith('{"event":"code_')).map((message) => JSON.parse(message));
 	assert.equal(usage.length, 5);
 	assert.doesNotMatch(JSON.stringify(usage), /private returned content|private exception content|private_source_marker|example\.com|networkidle2/);
@@ -914,22 +1034,29 @@ test("records correlated operational metadata without source, results or excepti
 
 test("keeps Code Mode outcomes unchanged when telemetry fails", async () => {
 	const fixture = debugServer.getWorker("mcp-infrastructure-test");
+
 	const run = async (options) => (await fixture.fetch("/", {
 		method: "POST", body: JSON.stringify({ action: "telemetry", ...options }),
 	})).json();
+
 	for (const status of ["completed", "error", "paused"]) {
 		const output = {
 			status, executionId: "private execution id",
 			result: { secret: "private result" }, error: "private error", logs: ["private sandbox log"],
 			calls: [{ seq: 0, connector: "test", method: "request", state: "applied", args: { token: "private token" } }],
 		};
-		const response = { content: [{ type: "text", text: "client response" }], ...(status === "completed" ? {} : { isError: true }) };
+
+		const response = { content: [{ type: "text", text: "client response" }] };
+
+		if (status !== "completed") response.isError = true;
+
 		for (const loggingFailure of [false, true]) {
 			const result = await run({ output, response, loggingFailure });
 			assert.equal(result.sameReference, true);
 			assert.deepEqual(result.result, response);
 			assert.equal(result.executions, 1);
 			assert.equal(result.logs.length === 0, loggingFailure);
+
 			if (!loggingFailure) {
 				const summary = result.logs.find((event) => event.event === "code_execution");
 				assert.equal(summary.status, status);
@@ -940,11 +1067,13 @@ test("keeps Code Mode outcomes unchanged when telemetry fails", async () => {
 			}
 		}
 	}
+
 	for (const loggingFailure of [false, true]) {
 		const result = await run({ throw: true, loggingFailure });
 		assert.equal(result.error, "private exception must not be logged");
 		assert.equal(result.executions, 1);
 		assert.equal(result.logs.length === 0, loggingFailure);
+
 		if (!loggingFailure) {
 			const summary = result.logs.find((event) => event.event === "code_execution");
 			assert.equal(summary.status, "exception");
@@ -957,14 +1086,18 @@ test("keeps Code Mode outcomes unchanged when telemetry fails", async () => {
 
 test("excludes all connector and MCP payloads and reports output-assembly failures", async () => {
 	const fixture = debugServer.getWorker("mcp-infrastructure-test");
+
 	const run = async (options) => (await fixture.fetch("/", {
 		method: "POST", body: JSON.stringify({ action: "telemetry", ...options }),
 	})).json();
+
 	const completed = { status: "completed", executionId: "exec-fixture", calls: [], result: true };
+
 	const response = { structuredContent: { result: {
 		personal: "private personal data", access_token: "fixture-access-token", nextToken: "native-pagination",
 		password: "fixture-password", providerKey: "worker-key-to-redact", image: { type: "image", mimeType: "image/jpeg", data: JPEG_BASE64 },
 	} }, content: [{ type: "image", mimeType: "image/jpeg", data: JPEG_BASE64 }] };
+
 	const recorded = await run({ output: completed, response });
 	assert.deepEqual(recorded.result, response, "Logging must not mutate the client-visible response.");
 	assert.equal(recorded.logs.length, 1);
@@ -972,11 +1105,13 @@ test("excludes all connector and MCP payloads and reports output-assembly failur
 	assert.doesNotMatch(logs, /private personal data|native-pagination|fixture-access-token|fixture-password|worker-key-to-redact/);
 	assert.ok(!logs.includes(JPEG_BASE64));
 	const large = "\u00e9".repeat(80_000);
+
 	const oversized = await run({
 		output: { ...completed, calls: Array.from({ length: 40 }, (_, seq) => ({
 			seq, connector: "test", method: "request", state: "applied", args: { query: large }, result: { body: large },
 		})) }, response: { structuredContent: { result: large } },
 	});
+
 	const totalBytes = oversized.logs.reduce((total, event) => total + Buffer.byteLength(JSON.stringify(event)), 0);
 	assert.ok(totalBytes < 16 * 1024, totalBytes);
 	assert.equal(oversized.logs.length, 41);
@@ -994,23 +1129,28 @@ test("excludes all connector and MCP payloads and reports output-assembly failur
 
 test("traces execution and connector outcomes without replaying work when tracing fails", async () => {
 	const fixture = debugServer.getWorker("mcp-infrastructure-test");
+
 	const output = { status: "completed", executionId: "exec-trace-fixture", calls: [
 		{ seq: 0, connector: "test", method: "request", state: "applied", args: {}, result: { ok: true } },
 	] };
+
 	const run = async (options) => (await fixture.fetch("/", {
 		method: "POST", body: JSON.stringify({ action: "telemetry", output, response: { isError: true }, ...options }),
 	})).json();
+
 	const recorded = await run({ mockTracing: true });
 	assert.deepEqual(recorded.spans.map((span) => span.name), ["mcp.code", "connector.test.request"]);
 	assert.deepEqual(recorded.spans.map((span) => span.status.code), ["error", "ok"]);
 	const summary = recorded.logs.at(-1);
 	assert.equal(summary.status, "completed");
 	assert.equal(summary.mcpStatus, "error");
+
 	for (const span of recorded.spans) {
 		assert.equal(span.attributes["concierge.invocation_id"], summary.invocationId);
 		assert.equal(span.attributes["concierge.execution_id"], output.executionId);
 		assert.doesNotMatch(JSON.stringify(span.attributes), /payload|args|result|async/);
 	}
+
 	for (const tracingFailure of ["before", "after"]) {
 		const success = await run({ tracingFailure, response: { content: [{ type: "text", text: "unchanged" }] } });
 		assert.equal(success.executions, 1);
@@ -1031,26 +1171,34 @@ test("keeps usage correlation isolated across concurrent MCP invocations", async
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = async (input, init) => {
 		const url = new URL(new Request(input, init).url);
+
 		if (url.hostname !== "api.ui.com") return originalFetch(input, init);
 		await new Promise((resolve) => setTimeout(resolve, 10));
+
 		return Response.json({ marker: url.searchParams.get("marker") });
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			const results = await Promise.all(["first", "second"].map((marker) => client.callTool({ name: "code", arguments: {
 				code: `async () => await unifi.request({ method: 'GET', path: '/v1/hosts', query: { marker: '${marker}' } })`,
 			} })));
+
 			assert.deepEqual(results.map((result) => result.structuredContent.result.marker), ["first", "second"]);
 		});
+
 		const events = await waitFor(() => {
 			const events = debugServer.getLogs().flatMap((log) => log.message ?? [])
 				.filter((message) => typeof message === "string" && message.startsWith('{"event":"code_'))
 				.map((message) => JSON.parse(message));
+
 			return events.filter((event) => event.event === "code_execution").length === 2 ? events : undefined;
 		}, "concurrent usage summaries");
+
 		const calls = events.filter((event) => event.event === "code_connector_call");
 		assert.equal(new Set(calls.map((event) => event.invocationId)).size, 2);
 		assert.equal(new Set(calls.map((event) => event.executionId)).size, 2);
+
 		for (const call of calls) {
 			const summary = events.find((event) => event.event === "code_execution" && event.invocationId === call.invocationId);
 			assert.equal(summary.executionId, call.executionId);
@@ -1058,6 +1206,7 @@ test("keeps usage correlation isolated across concurrent MCP invocations", async
 			assert.equal(summary.mcpStatus, "success");
 			assert.equal(call.sequence, 0);
 		}
+
 		assert.doesNotMatch(JSON.stringify(events), /first|second|marker|query/);
 	} finally { globalThis.fetch = originalFetch; }
 });
@@ -1070,14 +1219,18 @@ test("omits credentials and personal data from real MCP operational logs", async
 			token: 'unknown-token-fixture', client_secret: '${TEST_SECRETS.ACCESS_CLIENT_SECRET}',
 			nextToken: 'next-page-fixture', password: 'password-with-"quote-fixture'
 		})` } });
+
 		assert.equal(result.structuredContent.result.providerKey, TEST_SECRETS.UNIFI_API_KEY);
 	});
+
 	const events = await waitFor(() => {
 		const events = debugServer.getLogs().flatMap((log) => log.message ?? [])
 			.filter((message) => typeof message === "string" && message.startsWith('{"event":"code_'))
 			.map((message) => JSON.parse(message));
+
 		return events.some((event) => event.event === "code_execution") ? events : undefined;
 	}, "metadata-only usage logs");
+
 	const logs = JSON.stringify(events);
 	assert.equal(events.length, 1);
 	assert.doesNotMatch(logs, /personal payload fixture|next-page-fixture|test-unifi-api-key|test-access-secret|unknown-token-fixture|quote-fixture/);
@@ -1091,6 +1244,7 @@ test("keeps record identity, status and pagination usable in truncated list resu
 				next_cursor: "next-page-1000", has_more: true
 			})`,
 		} });
+
 		assert.equal(result.isError, undefined);
 		const page = result.structuredContent.result;
 		assert.equal(page.next_cursor, "next-page-1000");
@@ -1099,11 +1253,13 @@ test("keeps record identity, status and pagination usable in truncated list resu
 		assert.match(page.items.at(-1), /--- TRUNCATED ---.*more items/);
 		const records = page.items.slice(0, -1);
 		assert.ok(records.length > 0 && records.length < 1000);
+
 		for (const [i, record] of records.entries()) {
 			assert.equal(record.id, `record-${i}`);
 			assert.equal(record.status, i % 2 ? "pending" : "done");
 			assert.match(JSON.stringify(record), /--- TRUNCATED ---/);
 		}
+
 		assert.deepEqual(JSON.parse(result.content[0].text), page);
 	});
 });
@@ -1116,11 +1272,14 @@ test("returns projected native pages unchanged without truncation", async () => 
 				return { ...page, items: page.items.map(({ id, status }) => ({ id, status })) };
 			}`,
 		} });
+
 		assert.equal(result.isError, undefined);
+
 		const expected = {
 			items: Array.from({ length: 10 }, (_, i) => ({ id: `record-${i}`, status: "done" })),
 			next_cursor: "next-page-10", has_more: true,
 		};
+
 		assert.deepEqual(result.structuredContent.result, expected);
 		assert.deepEqual(JSON.parse(result.content[0].text), expected);
 		assert.doesNotMatch(JSON.stringify(result), /--- TRUNCATED ---/);
@@ -1157,15 +1316,18 @@ test("calls Browser Run through the Cloudflare connector", async () => {
 test("uses bounded browser readiness overrides and represents missing metadata honestly", async () => {
 	await withMcpClient(undefined, async (client) => {
 		const invoke = (args) => client.callTool({ name: "code", arguments: { code: `async () => await cloudflare.read_webpage_as_markdown(${JSON.stringify(args)})` } });
+
 		for (const waitUntil of ["domcontentloaded", "load", "networkidle0", "networkidle2"]) {
 			const result = await invoke({ url: "https://example.com/test", waitUntil, waitForSelector: { selector: "#ready", timeout: 500 } });
 			assert.equal(result.isError, undefined);
 			assert.match(result.structuredContent.result.markdown, new RegExp(`Wait: ${waitUntil}\\nSelector: #ready\\nSelector timeout: 500`));
 		}
+
 		const defaultTimeout = await invoke({ url: "https://example.com/test", waitForSelector: { selector: "main" } });
 		assert.match(defaultTimeout.structuredContent.result.markdown, /Selector timeout: 10000/);
 		const missing = await invoke({ url: "https://example.com/no-metadata" });
 		assert.equal(missing.isError, undefined);
+
 		for (const key of ["finalUrl", "title", "status"]) assert.equal(missing.structuredContent.result[key], null);
 	});
 });
@@ -1178,6 +1340,7 @@ test("rejects empty, HTTP-error and recognizable gated browser pages without lea
 			assert.match(result.content[0].text, message);
 			assert.doesNotMatch(JSON.stringify(result), /Private upstream error|private-test-cookie/);
 		}
+
 		const article = await client.callTool({ name: "code", arguments: { code: "async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/login-article' })" } });
 		assert.equal(article.isError, undefined);
 	});
@@ -1190,6 +1353,7 @@ test("paginates fresh browser reads without losing content or silently mixing ve
 		let offset = 0;
 		let contentHash;
 		let text = "";
+
 		do {
 			const result = await invoke({ url, offset, contentHash });
 			assert.equal(result.isError, undefined);
@@ -1203,10 +1367,13 @@ test("paginates fresh browser reads without losing content or silently mixing ve
 			offset = page.nextOffset;
 			contentHash = page.contentHash;
 		} while (offset !== null);
+
 		assert.equal(text, "0123456789".repeat(3_000));
+
 		for (const args of [{ url, offset: 1 }, { url, offset: 30_000, contentHash }, { url, contentHash: "0".repeat(64) }]) {
 			assert.equal((await invoke(args)).isError, true);
 		}
+
 		const changedUrl = "https://example.com/changing";
 		const first = (await invoke({ url: changedUrl, maxChars: 3 })).structuredContent.result;
 		const changed = await invoke({ url: changedUrl, offset: first.nextOffset, contentHash: first.contentHash });
@@ -1232,10 +1399,12 @@ test("exposes generated connector contracts and validates browser inputs", async
 		const docs = await client.callTool({ name: "code", arguments: {
 			code: "async () => ({ google: await codemode.describe('google.request'), browser: await codemode.describe('cloudflare.read_webpage_as_markdown') })",
 		} });
+
 		assert.equal(docs.isError, undefined);
 		assert.match(JSON.stringify(docs.structuredContent.result.google), /GET.*POST.*PATCH.*DELETE/s);
 		assert.match(JSON.stringify(docs.structuredContent.result.google), /gmail/);
 		assert.match(JSON.stringify(docs.structuredContent.result.browser), /url/);
+
 		for (const args of [null, {}, { url: "" }, { url: "not-a-url" }, { url: "ftp://example.com" }, { url: "https://user:password@example.com" }, { url: "https://example.com", extra: true }, ...[
 			{ waitUntil: "never" }, { waitForSelector: { selector: "" } }, { waitForSelector: { selector: "main", timeout: 10_001 } },
 			{ waitForSelector: { selector: "main", hidden: true } }, { offset: -1 }, { offset: 0.5 }, { maxChars: 0 }, { maxChars: 1 }, { maxChars: 12_001 },
@@ -1244,6 +1413,7 @@ test("exposes generated connector contracts and validates browser inputs", async
 			const result = await client.callTool({ name: "code", arguments: {
 				code: `async () => await cloudflare.read_webpage_as_markdown(${JSON.stringify(args)})`,
 			} });
+
 			assert.equal(result.isError, true, JSON.stringify(args));
 		}
 	});
@@ -1254,12 +1424,15 @@ test("does not expose the removed Notion connector", async () => {
 		const result = await client.callTool({ name: "code", arguments: {
 			code: "async () => ({ matches: await codemode.search('notion'), available: typeof notion !== 'undefined' })",
 		} });
+
 		assert.equal(result.isError, undefined);
 		assert.ok(result.structuredContent.result.matches.results.every((match) => match.connector !== "notion"));
 		assert.equal(result.structuredContent.result.available, false);
+
 		const removedCall = await client.callTool({ name: "code", arguments: {
 			code: "async () => await notion.request({ method: 'GET', path: '/v1/users/me' })",
 		} });
+
 		assert.equal(removedCall.isError, true);
 	});
 });
@@ -1269,18 +1442,23 @@ test("rejects invalid Google request arguments before outbound calls", async () 
 	let outboundCalls = 0;
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
+
 		if (["gmail.googleapis.com", "oauth2.googleapis.com"].includes(new URL(request.url).hostname)) {
 			outboundCalls++;
+
 			return Response.json({});
 		}
+
 		return originalFetch(input, init);
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			for (const fields of ["query: { value: NaN }", "query: { value: Infinity }", "query: { value: {} }", "query: { values: [{}] }", "body: {}", "extra: true", "method: 'TRACE'"]) {
 				const result = await client.callTool({ name: "code", arguments: {
 					code: `async () => await google.request({ service: 'gmail', method: 'GET', path: '/gmail/v1/users/me/profile', ${fields} })`,
 				} });
+
 				assert.equal(result.isError, true, fields);
 			}
 		});
@@ -1292,6 +1470,7 @@ test("rejects invalid Google request arguments before outbound calls", async () 
 
 test("discovers Exa and preserves native search, contents, answers and resource requests", async () => {
 	const originalFetch = globalThis.fetch;
+
 	const cases = [
 		{ options: { method: "POST", path: "/search", body: { query: "Cloudflare Workers", type: "auto", numResults: 1, includeDomains: ["developers.cloudflare.com"], contents: { highlights: true, text: { maxCharacters: 1000 } }, outputSchema: { type: "object", properties: { title: { type: "string" } } } } }, result: { requestId: "search-id", results: [{ url: "https://developers.cloudflare.com/workers/", title: "Workers", highlights: ["A source excerpt"], publishedDate: "2026-10-01", score: 0.9 }], costDollars: { total: 0.005 }, warnings: [{ tag: "fixture-warning" }] } },
 		{ options: { method: "POST", path: "/contents", body: { urls: ["https://example.com/page", "https://example.com/missing"], text: { maxCharacters: 500 }, maxAgeHours: 0 } }, result: { results: [{ url: "https://example.com/page", text: "Native source text" }], statuses: [{ id: "https://example.com/page", status: "success" }, { id: "https://example.com/missing", status: "error", error: { tag: "CRAWL_NOT_FOUND" } }] } },
@@ -1304,14 +1483,17 @@ test("discovers Exa and preserves native search, contents, answers and resource 
 		{ options: { method: "GET", path: "/batches", query: { limit: 1 } }, result: { data: [], hasMore: false } },
 		{ options: { method: "DELETE", path: "/agent/runs/run-fixture" }, result: null },
 	];
+
 	let current;
 	let calls = 0;
 	let dispatchFailure;
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
 		const url = new URL(request.url);
+
 		if (url.hostname !== "api.exa.ai") return originalFetch(input, init);
 		calls++;
+
 		try {
 			assert.equal(request.headers.get("Authorization"), `Bearer ${TEST_SECRETS.EXA_API_KEY}`);
 			assert.equal(request.headers.get("Accept"), "application/json");
@@ -1320,25 +1502,32 @@ test("discovers Exa and preserves native search, contents, answers and resource 
 			assert.equal(request.method, current.options.method);
 			assert.equal(url.pathname, current.options.path);
 			assert.deepEqual(Object.fromEntries(url.searchParams), Object.fromEntries(Object.entries(current.options.query ?? {}).map(([k, v]) => [k, String(v)])));
+
 			if (current.options.body !== undefined) {
 				assert.equal(request.headers.get("Content-Type"), "application/json");
 				assert.deepEqual(await request.json(), current.options.body);
 			} else assert.equal(await request.text(), "");
+
 			return current.result === null ? new Response(null, { status: 204 }) : Response.json(current.result);
 		} catch (error) { dispatchFailure = error; throw error; }
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			assert.match((await client.listTools()).tools[0].description, /exa\.request/);
+
 			for (const query of ["exa", "external web search", "page content extraction", "similar links", "cited answers"]) {
 				const result = await client.callTool({ name: "code", arguments: { code: `async () => await codemode.search(${JSON.stringify(query)})` } });
 				assert.ok(result.structuredContent.result.results.some((match) => match.path === "exa.request"), query);
 			}
+
 			const docs = await client.callTool({ name: "code", arguments: { code: "async () => await codemode.describe('exa.request')" } });
 			assert.match(JSON.stringify(docs), /per-URL statuses/);
 			assert.match(JSON.stringify(docs), /30-second/);
+
 			for (current of cases) {
 				const result = await client.callTool({ name: "code", arguments: { code: `async () => await exa.request(${JSON.stringify(current.options)})` } });
+
 				if (dispatchFailure) throw dispatchFailure;
 				assert.equal(result.isError, undefined, JSON.stringify(result));
 				assert.deepEqual(result.structuredContent.result, current.result);
@@ -1356,11 +1545,14 @@ test("Exa rejects credential overrides, alternate origins, invalid bodies and st
 	globalThis.fetch = async (input, init) => {
 		if (!new URL(new Request(input, init).url).hostname.endsWith("exa.ai")) return originalFetch(input, init);
 		calls++;
+
 		return Response.json({ unexpected: true });
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			const base = { method: "POST", path: "/search", body: { query: "fixture" } };
+
 			for (const override of [
 				{ method: "OPTIONS" }, { apiKey: "override" }, { headers: { Authorization: "Bearer override" } },
 				{ url: "https://api.exa.ai/search" }, { path: "https://api.exa.ai/search" },
@@ -1386,23 +1578,29 @@ test("Exa retries known retrievals but never replays resource mutations", async 
 	globalThis.fetch = async (input, init) => {
 		if (new URL(new Request(input, init).url).hostname !== "api.exa.ai") return originalFetch(input, init);
 		calls++;
+
 		if (recover && calls > 1) return Response.json({ results: [] });
+
 		return Response.json({ tag: "SERVICE_OVERLOADED", requestId: "exa-request-id", error: `Provider error ${TEST_SECRETS.EXA_API_KEY}` }, { status, headers: { "Retry-After": "0" } });
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			const invoke = (options) => client.callTool({ name: "code", arguments: { code: `async () => await exa.request(${JSON.stringify(options)})` } });
+
 			for (const path of ["/search", "/contents", "/findSimilar", "/answer"]) {
 				calls = 0;
 				const result = await invoke({ method: "POST", path, body: { fixture: true } });
 				assert.equal(result.isError, undefined, JSON.stringify(result));
 				assert.equal(calls, 2, path);
 			}
+
 			calls = 0;
 			status = 429;
 			assert.equal((await invoke({ method: "GET", path: "/agent/runs/fixture" })).isError, undefined);
 			assert.equal(calls, 2);
 			recover = false;
+
 			for (status of [429, 503]) for (const options of [
 				{ method: "POST", path: "/agent/runs", body: { query: "fixture" } },
 				{ method: "POST", path: "/batches", body: {} },
@@ -1432,8 +1630,10 @@ test("Exa classifies native errors and preserves billing failures without leakin
 	globalThis.fetch = async (input, init) => {
 		if (new URL(new Request(input, init).url).hostname !== "api.exa.ai") return originalFetch(input, init);
 		calls++;
+
 		return Response.json(payload, { status });
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			for (status of [400, 401, 402, 403]) {
@@ -1445,9 +1645,12 @@ test("Exa classifies native errors and preserves billing failures without leakin
 				assert.match(result.content[0].text, new RegExp(`HTTP ${status}`));
 				assert.match(result.content[0].text, /retryable=false/);
 				assert.doesNotMatch(JSON.stringify(result), /test-exa-api-key/);
+
 				if (status === 402) assert.match(result.content[0].text, /code=NO_MORE_CREDITS/);
+
 				if (status === 401 || status === 403) assert.doesNotMatch(JSON.stringify(result), /Provider error/);
 			}
+
 			status = 400;
 			payload = { error: { type: "INVALID_REQUEST", code: "INVALID_OUTPUT_SCHEMA", message: `Bad schema ${TEST_SECRETS.EXA_API_KEY}` } };
 			const result = await client.callTool({ name: "code", arguments: { code: "async () => await exa.request({ method: 'POST', path: '/agent/runs', body: { query: 'fixture' } })" } });
@@ -1463,13 +1666,18 @@ test("Exa rejects redirects, SSE, binary and invalid JSON without replaying succ
 	let calls = 0;
 	globalThis.fetch = async (input, init) => {
 		const url = new URL(new Request(input, init).url);
+
 		if (!["api.exa.ai", "evil.example"].includes(url.hostname)) return originalFetch(input, init);
 		assert.equal(url.hostname, "api.exa.ai");
 		calls++;
+
 		if (mode === "redirect") return new Response(null, { status: 302, headers: { Location: "https://evil.example/" } });
+
 		if (mode === "network") throw new Error("private network failure test-exa-api-key");
+
 		return new Response("private-response-body", { headers: { "Content-Type": mode === "sse" ? "text/event-stream" : mode === "binary" ? "image/jpeg" : "application/json" } });
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			for (mode of ["redirect", "sse", "binary", "json", "network"]) {
@@ -1492,8 +1700,10 @@ test("Exa fails clearly before dispatch when its API key is missing", async () =
 	globalThis.fetch = async (input, init) => {
 		if (new URL(new Request(input, init).url).hostname !== "api.exa.ai") return originalFetch(input, init);
 		calls++;
+
 		return Response.json({ unexpected: true });
 	};
+
 	try {
 		const listener = await harness.listen();
 		await client.connect(new StreamableHTTPClientTransport(new URL("/debug/mcp", listener.url)));
@@ -1508,8 +1718,10 @@ test("discovers Twilio and preserves native messages, form bodies, account paths
 	const originalFetch = globalThis.fetch;
 	const prefix = `/2010-04-01/Accounts/${TEST_SECRETS.TWILIO_ACCOUNT_SID}`;
 	const authorization = `Basic ${Buffer.from(`${TEST_SECRETS.TWILIO_API_KEY_SID}:${TEST_SECRETS.TWILIO_API_KEY_SECRET}`).toString("base64")}`;
+
 	const page = { messages: [{ sid: "SMfixture", body: "Native message", status: "received", price: "-0.01" }],
 		next_page_uri: `${prefix}/Messages.json?PageToken=native%2Btoken&PageSize=1`, page: 0, page_size: 1 };
+
 	const cases = [
 		{ options: { method: "GET", path: "/2010-04-01/Accounts/{AccountSid}/Messages.json", query: { PageSize: 1, "DateSent>=": "2026-10-01", To: "+15555550123" } }, result: page },
 		{ options: { method: "GET", path: `${prefix}/Messages.json`, query: { PageToken: "native+token", PageSize: 1 } }, result: { ...page, next_page_uri: null, page: 1 } },
@@ -1519,14 +1731,17 @@ test("discovers Twilio and preserves native messages, form bodies, account paths
 		{ options: { method: "GET", path: `${prefix}/Usage/Records/Today.json` }, result: { usage_records: [{ category: "sms", count: "2" }] } },
 		{ options: { method: "DELETE", path: `${prefix}/Messages/SMfixture.json` }, result: null },
 	];
+
 	let current;
 	let calls = 0;
 	let dispatchFailure;
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
 		const url = new URL(request.url);
+
 		if (url.hostname !== "api.twilio.com") return originalFetch(input, init);
 		calls++;
+
 		try {
 			assert.equal(request.headers.get("Authorization"), authorization);
 			assert.equal(request.headers.get("Accept"), "application/json");
@@ -1535,28 +1750,36 @@ test("discovers Twilio and preserves native messages, form bodies, account paths
 			assert.equal(request.method, current.options.method);
 			assert.equal(url.pathname, current.options.path.replace("{AccountSid}", TEST_SECRETS.TWILIO_ACCOUNT_SID));
 			assert.deepEqual(Object.fromEntries(url.searchParams), Object.fromEntries(Object.entries(current.options.query ?? {}).map(([k, v]) => [k, String(v)])));
+
 			if (current.options.body !== undefined) {
 				assert.equal(request.headers.get("Content-Type"), "application/x-www-form-urlencoded");
 				const body = new URLSearchParams(await request.text());
+
 				for (const [key, value] of Object.entries(current.options.body))
 					assert.deepEqual(body.getAll(key), (Array.isArray(value) ? value : [value]).map(String));
 			} else assert.equal(await request.text(), "");
+
 			return current.result === null ? new Response(null, { status: 204 }) : Response.json(current.result);
 		} catch (error) { dispatchFailure = error; throw error; }
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			const tools = await client.listTools();
 			assert.match(tools.tools[0].description, /twilio\.request/);
+
 			for (const query of ["twilio", "send SMS", "message delivery status", "voice calls", "phone numbers"]) {
 				const result = await client.callTool({ name: "code", arguments: { code: `async () => await codemode.search(${JSON.stringify(query)})` } });
 				assert.ok(result.structuredContent.result.results.some((match) => match.path === "twilio.request"), query);
 			}
+
 			const docs = await client.callTool({ name: "code", arguments: { code: "async () => await codemode.describe('twilio.request')" } });
 			assert.match(JSON.stringify(docs), /form parameters|form body fields/);
 			assert.doesNotMatch(JSON.stringify(docs), /test-twilio-api-secret/);
+
 			for (current of cases) {
 				const result = await client.callTool({ name: "code", arguments: { code: `async () => await twilio.request(${JSON.stringify(current.options)})` } });
+
 				if (dispatchFailure) throw dispatchFailure;
 				assert.equal(result.isError, undefined, JSON.stringify(result));
 				assert.deepEqual(result.structuredContent.result, current.result);
@@ -1575,9 +1798,12 @@ test("Twilio rejects credential overrides, account escapes, unsupported paths an
 	globalThis.fetch = async (input, init) => {
 		if (!new URL(new Request(input, init).url).hostname.endsWith("twilio.com")) return originalFetch(input, init);
 		calls++;
+
 		return Response.json({ unexpected: true });
 	};
+
 	const base = { method: "GET", path: "/2010-04-01/Accounts/{AccountSid}/Messages.json" };
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			for (const override of [
@@ -1614,10 +1840,13 @@ test("Twilio shares read retries and redaction without replaying sends or other 
 	globalThis.fetch = async (input, init) => {
 		if (new URL(new Request(input, init).url).hostname !== "api.twilio.com") return originalFetch(input, init);
 		calls++;
+
 		if (recover && calls > 1) return Response.json({ messages: [] });
+
 		return Response.json({ code: 21614, message: `Provider error ${TEST_SECRETS.TWILIO_API_KEY_SID} ${TEST_SECRETS.TWILIO_API_KEY_SECRET} ${encoded}` },
 			{ status, headers: { "Retry-After": "0", "X-Request-Id": `request-${TEST_SECRETS.TWILIO_API_KEY_SECRET}` } });
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			const invoke = (method) => client.callTool({ name: "code", arguments: { code: `async () => await twilio.request({ method: '${method}', path: '/2010-04-01/Accounts/{AccountSid}/Messages.json' ${method === "POST" ? ", body: { To: '+15555550123', From: '+15555550456', Body: 'fixture' }" : ""} })` } });
@@ -1625,6 +1854,7 @@ test("Twilio shares read retries and redaction without replaying sends or other 
 			assert.equal((await invoke("GET")).isError, undefined);
 			assert.equal(calls, 2);
 			recover = false;
+
 			for (status of [400, 401, 403, 429, 503]) {
 				calls = 0;
 				const result = await invoke("POST");
@@ -1633,7 +1863,9 @@ test("Twilio shares read retries and redaction without replaying sends or other 
 				assert.match(result.content[0].text, new RegExp(`HTTP ${status}`));
 				assert.match(result.content[0].text, /safe_to_replay=false/);
 				assert.match(result.content[0].text, status === 503 ? /outcome=unknown/ : /outcome=rejected/);
+
 				if (status !== 401) assert.match(result.content[0].text, /code=21614/);
+
 				for (const secret of [TEST_SECRETS.TWILIO_API_KEY_SID, TEST_SECRETS.TWILIO_API_KEY_SECRET, encoded])
 					assert.ok(!JSON.stringify(result).includes(secret));
 			}
@@ -1647,13 +1879,17 @@ test("Twilio does not follow redirects or replay successful writes with unsuppor
 	let calls = 0;
 	globalThis.fetch = async (input, init) => {
 		const url = new URL(new Request(input, init).url);
+
 		if (!["api.twilio.com", "evil.example"].includes(url.hostname)) return originalFetch(input, init);
 		assert.equal(url.hostname, "api.twilio.com");
 		calls++;
+
 		if (mode === "network") throw new Error("private network error test-twilio-api-secret");
+
 		return mode === "redirect" ? new Response(null, { status: 302, headers: { Location: "https://evil.example/" } })
 			: new Response("private-media-data", { headers: { "Content-Type": "image/jpeg; filename=private-header" } });
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			for (mode of ["redirect", "media", "network"]) {
@@ -1674,13 +1910,16 @@ test("Twilio fails clearly without dispatch when credentials are missing or malf
 	globalThis.fetch = async (input, init) => {
 		if (new URL(new Request(input, init).url).hostname !== "api.twilio.com") return originalFetch(input, init);
 		calls++;
+
 		return Response.json({ unexpected: true });
 	};
+
 	try {
 		for (const secrets of [{ TWILIO_ACCOUNT_SID: "" }, { TWILIO_API_KEY_SID: "" }, { TWILIO_API_KEY_SECRET: "" },
 			{ TWILIO_ACCOUNT_SID: "private-invalid-account" }, { TWILIO_API_KEY_SID: "private-invalid-key" }]) {
 			const harness = createConciergeHarness(true, secrets);
 			const client = new Client({ name: "twilio-config-test", version: "1" });
+
 			try {
 				const listener = await harness.listen();
 				await client.connect(new StreamableHTTPClientTransport(new URL("/debug/mcp", listener.url)));
@@ -1690,6 +1929,7 @@ test("Twilio fails clearly without dispatch when credentials are missing or malf
 				assert.doesNotMatch(JSON.stringify(result), /private-invalid|test-twilio-api-secret/);
 			} finally { await client.close(); await harness.close(); }
 		}
+
 		assert.equal(calls, 0);
 	} finally { globalThis.fetch = originalFetch; }
 });
@@ -1706,25 +1946,32 @@ test("discovers UniFi and preserves native Site Manager, Network and Protect req
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
 		const url = new URL(request.url);
+
 		if (url.hostname !== "api.ui.com") return originalFetch(input, init);
 		requests.push(request);
+
 		if (request.method === "DELETE") return new Response(null, { status: 204 });
+
 		return Response.json(url.pathname === "/v1/hosts" ? hosts : url.pathname.startsWith(protect) ? cameras : sites);
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			const tools = await client.listTools();
 			assert.match(tools.tools[0].description, /unifi\.request/);
+
 			for (const query of ["unifi", "wifi clients", "camera NVR status", "console discovery", "camera snapshot"]) {
 				const result = await client.callTool({ name: "code", arguments: { code: `async () => await codemode.search(${JSON.stringify(query)})` } });
 				assert.equal(result.isError, undefined);
 				assert.ok(result.structuredContent.result.results.some((match) => match.path === "unifi.request"), query);
 			}
+
 			const docs = await client.callTool({ name: "code", arguments: { code: "async () => await codemode.describe('unifi.request')" } });
 			assert.equal(docs.isError, undefined);
 			assert.match(docs.structuredContent.result.types, /GET.*POST.*PUT.*PATCH.*DELETE/s);
 			assert.match(docs.structuredContent.result.description, /\/v1\/hosts/);
 			assert.match(docs.structuredContent.result.description, /siteId/);
+
 			for (const [options, expectedPayload] of [
 				[{ method: "GET", path: "/v1/hosts", query: { pageSize: 1, nextToken: "next-page:123" } }, hosts],
 				[{ method: "GET", path: "/v1/devices", query: { hostIds: [consoleId, "another-console"] } }, sites],
@@ -1741,6 +1988,7 @@ test("discovers UniFi and preserves native Site Manager, Network and Protect req
 				assert.deepEqual(result.structuredContent.result, expectedPayload);
 				const request = requests.at(-1);
 				const expectedUrl = new URL(options.path, "https://api.ui.com");
+
 				for (const [key, value] of Object.entries(options.query ?? {})) for (const item of Array.isArray(value) ? value : [value]) expectedUrl.searchParams.append(key, String(item));
 				assert.equal(request.url, expectedUrl.href);
 				assert.equal(request.method, options.method);
@@ -1748,10 +1996,12 @@ test("discovers UniFi and preserves native Site Manager, Network and Protect req
 				assert.equal(request.headers.get("Accept"), "application/json, image/jpeg");
 				assert.equal(request.headers.has("Authorization"), false);
 				assert.equal(request.headers.has("X-Goog-Api-Key"), false);
+
 				if (options.body) {
 					assert.equal(request.headers.get("Content-Type"), "application/json");
 					assert.deepEqual(await request.json(), options.body);
 				}
+
 				assert.doesNotMatch(JSON.stringify(result), /test-unifi-api-key|test-maps-api-key|test-google-workspace-token/);
 			}
 		});
@@ -1763,10 +2013,13 @@ test("rejects invalid UniFi inputs, credential overrides, and unsupported proxy 
 	let calls = 0;
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
+
 		if (new URL(request.url).hostname !== "api.ui.com") return originalFetch(input, init);
 		calls++;
+
 		return Response.json({});
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			for (const override of [
@@ -1799,21 +2052,27 @@ test("UniFi reuses shared read retries, preserves unknown writes, and redacts pr
 	let recover = true;
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
+
 		if (new URL(request.url).hostname !== "api.ui.com") return originalFetch(input, init);
 		calls++;
+
 		if (recover && calls > 1) return Response.json({ data: [], nextToken: "next-page" });
+
 		return Response.json({ code: "provider_error", message: `private-body ${TEST_SECRETS.UNIFI_API_KEY}`, traceId: `trace-${TEST_SECRETS.UNIFI_API_KEY}` }, { status, headers: { "Retry-After": "0" } });
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			const invoke = (method = "GET") => client.callTool({ name: "code", arguments: {
 				code: `async () => await unifi.request({ method: '${method}', path: '/v1/connector/consoles/id/proxy/protect/integration/v1/cameras/camera-id', ${method === "GET" ? "" : "body: { name: 'Updated camera' }"} })`,
 			} });
+
 			assert.deepEqual((await invoke()).structuredContent.result, { data: [], nextToken: "next-page" });
 			assert.equal(calls, 2);
 			calls = 0; status = 408;
 			assert.equal((await invoke()).isError, undefined);
 			assert.equal(calls, 2, "A proxy timeout may be retried for a read.");
+
 			for (const mutationStatus of [408, 429, 503]) {
 				calls = 0; status = mutationStatus;
 				const result = await invoke("PATCH");
@@ -1823,6 +2082,7 @@ test("UniFi reuses shared read retries, preserves unknown writes, and redacts pr
 				assert.match(result.content[0].text, mutationStatus === 429 ? /outcome=rejected/ : /outcome=unknown/);
 				assert.doesNotMatch(JSON.stringify(result), /test-unifi-api-key/);
 			}
+
 			for (const authStatus of [401, 403]) {
 				calls = 0; status = authStatus; recover = false;
 				const result = await invoke();
@@ -1840,19 +2100,24 @@ test("UniFi rejects redirects and unsupported media without exposing response bo
 	let calls = 0;
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
+
 		if (!["api.ui.com", "evil.example"].includes(new URL(request.url).hostname)) return originalFetch(input, init);
 		assert.equal(new URL(request.url).hostname, "api.ui.com", "API credentials must never follow a redirect.");
 		calls++;
+
 		return mode === "redirect" ? new Response(null, { status: 302, headers: { Location: "https://evil.example/" } })
 			: new Response("private-image-data", { headers: { "Content-Type": "video/mp4" } });
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			for (const currentMode of ["redirect", "media"]) {
 				mode = currentMode; calls = 0;
+
 				const result = await client.callTool({ name: "code", arguments: {
 					code: "async () => await unifi.request({ method: 'GET', path: '/v1/connector/consoles/id/proxy/protect/integration/v1/cameras/camera-id/snapshot' })",
 				} });
+
 				assert.equal(result.isError, true);
 				assert.equal(calls, 1);
 				assert.match(result.content[0].text, currentMode === "media"
@@ -1873,12 +2138,15 @@ test("delivers returned Protect JPEG snapshots as native MCP images with compact
 	const snapshot = "unifi.request({ method: 'GET', path: '/v1/connector/consoles/id/proxy/protect/integration/v1/cameras/camera-id/snapshot', query: { highQuality: false } })";
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
+
 		if (new URL(request.url).hostname !== "api.ui.com") return originalFetch(input, init);
 		calls++;
 		assert.equal(request.headers.get("X-API-Key"), TEST_SECRETS.UNIFI_API_KEY);
 		assert.equal(request.headers.get("Accept"), "application/json, image/jpeg");
+
 		return new Response(body, { status, headers: { "Content-Type": contentType } });
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			const invoke = (code) => client.callTool({ name: "code", arguments: { code } });
@@ -1944,6 +2212,7 @@ test("delivers returned Protect JPEG snapshots as native MCP images with compact
 					assert.equal(result.content.length, 1);
 					assert.equal(result.structuredContent, undefined);
 				}
+
 				body = JPEG;
 			});
 			await t.test("bounds retained bytes and image count even when fetched images are not returned", async () => {
@@ -1959,6 +2228,7 @@ test("delivers returned Protect JPEG snapshots as native MCP images with compact
 					assert.match(result.content[0].text, /Retrieve at most 4 images totaling 4 MiB.*do not replay writes/);
 					assert.equal(result.content.length, 1);
 				}
+
 				body = JPEG;
 			});
 			await t.test("rejects invalid JPEG, unsupported images and video, and preserves non-JSON HTTP failures", async () => {
@@ -1991,10 +2261,13 @@ test("UniFi fails clearly before dispatch when its API key is missing", async ()
 	globalThis.fetch = async (input, init) => {
 		if (new URL(new Request(input, init).url).hostname === "api.ui.com") {
 			calls++;
+
 			return Response.json({});
 		}
+
 		return originalFetch(input, init);
 	};
+
 	try {
 		await harness.listen();
 		await withMcpClient(undefined, async (client) => {
@@ -2012,23 +2285,31 @@ test("UniFi fails clearly before dispatch when its API key is missing", async ()
 test("calls Maps with native query/body, server-owned credentials, and unchanged JSON", async () => {
 	const originalFetch = globalThis.fetch;
 	const requests = [];
+
 	const payload = { places: [{ id: "test-place", displayName: { text: "Test cafe" }, rating: 4.8, userRatingCount: 120,
 		attributions: [{ provider: "Google Maps" }], reviews: [{ authorAttribution: { displayName: "Test reviewer" } }] }] };
+
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
+
 		if (new URL(request.url).hostname !== "places.googleapis.com") return originalFetch(input, init);
 		requests.push(request);
+
 		return Response.json(payload);
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			const tools = await client.listTools();
 			assert.match(tools.tools[0].description, /maps\.request/);
+
 			const docs = await client.callTool({ name: "code", arguments: {
 				code: "async () => ({ search: await codemode.search('business ratings'), docs: await codemode.describe('maps.request') })",
 			} });
+
 			assert.ok(docs.structuredContent.result.search.results.some((match) => match.path === "maps.request"));
 			assert.match(docs.structuredContent.result.docs.types, /places/);
+
 			for (const options of [
 				{ service: "places", method: "POST", path: "/v1/places:searchText", query: { fields: "places.id,places.rating,places.userRatingCount" }, body: { textQuery: "coffee shops in Brooklyn", pageSize: 1 } },
 				{ service: "places", method: "GET", path: "/v1/places/test-place", query: { "$fields": "id,rating,userRatingCount", languageCode: "en" } },
@@ -2044,6 +2325,7 @@ test("calls Maps with native query/body, server-owned credentials, and unchanged
 				assert.equal(request.method, options.method);
 				assert.equal(request.headers.get("X-Goog-Api-Key"), TEST_SECRETS.GOOGLE_MAPS_API_KEY);
 				assert.equal(request.headers.has("Authorization"), false);
+
 				if (options.body) assert.deepEqual(await request.json(), options.body);
 			}
 		});
@@ -2054,26 +2336,33 @@ test("calls Routes and route matrices with native bodies, masks, and unchanged p
 	const originalFetch = globalThis.fetch;
 	const requests = [];
 	const routes = { routes: [{ distanceMeters: 1200, duration: "600s", polyline: { encodedPolyline: "test-polyline" } }] };
+
 	const matrix = [
 		{ originIndex: 0, destinationIndex: 0, status: {}, condition: "ROUTE_EXISTS", distanceMeters: 1200, duration: "600s" },
 		{ originIndex: 0, destinationIndex: 1, status: { code: 5, message: "No route found" }, condition: "ROUTE_NOT_FOUND" },
 	];
+
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
+
 		if (new URL(request.url).hostname !== "routes.googleapis.com") return originalFetch(input, init);
 		requests.push(request);
+
 		return Response.json(new URL(request.url).pathname === "/directions/v2:computeRoutes" ? routes : matrix);
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			const docs = await client.callTool({ name: "code", arguments: {
 				code: "async () => ({ search: await codemode.search('travel time'), docs: await codemode.describe('maps.request') })",
 			} });
+
 			assert.ok(docs.structuredContent.result.search.results.some((match) => match.path === "maps.request"));
 			assert.match(docs.structuredContent.result.docs.types, /routes/);
 			assert.match(docs.structuredContent.result.docs.types, /computeRouteMatrix/);
 			const origin = { location: { latLng: { latitude: 40.7484, longitude: -73.9857 } } };
 			const destination = { address: "Grand Central Terminal, New York" };
+
 			for (const [options, payload] of [
 				[{ service: "routes", method: "POST", path: "/directions/v2:computeRoutes", query: { fields: "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline" }, body: { origin, destination, travelMode: "WALK" } }, routes],
 				[{ service: "routes", method: "POST", path: "/distanceMatrix/v2:computeRouteMatrix", query: { "$fields": "originIndex,destinationIndex,status,condition,distanceMeters,duration" }, body: { origins: [{ waypoint: origin }], destinations: [{ waypoint: destination }, { waypoint: { address: "Test destination" } }], travelMode: "DRIVE" } }, matrix],
@@ -2099,13 +2388,17 @@ test("rejects Maps credential overrides, invalid inputs, and endpoint escapes be
 	let calls = 0;
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
+
 		if (!["places.googleapis.com", "routes.googleapis.com"].includes(new URL(request.url).hostname)) return originalFetch(input, init);
 		calls++;
+
 		return Response.json({});
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			const base = { service: "places", method: "GET", path: "/v1/places/test-place" };
+
 			for (const override of [
 				{ service: "gmail" }, { method: "DELETE" }, { body: {} }, { fields: ["rating"] },
 				{ headers: { "X-Goog-Api-Key": "caller-key" } }, { query: { key: "caller-key" } },
@@ -2116,7 +2409,9 @@ test("rejects Maps credential overrides, invalid inputs, and endpoint escapes be
 				const result = await client.callTool({ name: "code", arguments: { code: `async () => await maps.request(${JSON.stringify({ ...base, ...override })})` } });
 				assert.equal(result.isError, true, JSON.stringify(override));
 			}
+
 			const route = { service: "routes", method: "POST", path: "/directions/v2:computeRoutes", body: {} };
+
 			for (const override of [
 				{ method: "GET" }, { method: "DELETE" }, { service: "places" },
 				{ path: "/v1/places:searchText" }, { path: "/directions/v2:futureOperation" },
@@ -2139,11 +2434,15 @@ test("Maps retries known read-only POSTs, never assumes arbitrary POSTs are safe
 	let recover = true;
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
+
 		if (new URL(request.url).hostname !== "places.googleapis.com") return originalFetch(input, init);
 		calls++;
+
 		if (recover && calls > 1) return Response.json({ places: [] });
+
 		return Response.json({ error: { status: "UNAVAILABLE", message: `Rejected ${TEST_SECRETS.GOOGLE_MAPS_API_KEY}` } }, { status });
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			const invoke = (path) => client.callTool({ name: "code", arguments: { code: `async () => await maps.request({ service: 'places', method: 'POST', path: '${path}', query: { fields: 'places.id' }, body: {} })` } });
@@ -2170,11 +2469,15 @@ test("Routes retries both read-only POST endpoints and redacts denied requests",
 	let denied = false;
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
+
 		if (new URL(request.url).hostname !== "routes.googleapis.com") return originalFetch(input, init);
 		calls++;
+
 		if (!denied && calls > 1) return Response.json({});
+
 		return Response.json({ error: { status: denied ? "PERMISSION_DENIED" : "UNAVAILABLE", message: `Rejected ${TEST_SECRETS.GOOGLE_MAPS_API_KEY}` } }, { status: denied ? 403 : 503 });
 	};
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			for (const path of ["/directions/v2:computeRoutes", "/distanceMatrix/v2:computeRouteMatrix"]) {
@@ -2183,6 +2486,7 @@ test("Routes retries both read-only POST endpoints and redacts denied requests",
 				assert.equal(result.isError, undefined);
 				assert.equal(calls, 2);
 			}
+
 			calls = 0; denied = true;
 			const result = await client.callTool({ name: "code", arguments: { code: "async () => await maps.request({ service: 'routes', method: 'POST', path: '/directions/v2:computeRoutes', body: {} })" } });
 			assert.equal(result.isError, true);
@@ -2194,12 +2498,14 @@ test("Routes retries both read-only POST endpoints and redacts denied requests",
 
 test("Maps fails clearly when its API key is missing", async () => {
 	const harness = createConciergeHarness(true, { GOOGLE_MAPS_API_KEY: "" });
+
 	try {
 		await harness.listen();
 		await withMcpClient(undefined, async (client) => {
 			const result = await client.callTool({ name: "code", arguments: {
 				code: "async () => await maps.request({ service: 'places', method: 'GET', path: '/v1/places/test-place', query: { fields: 'id' } })",
 			} });
+
 			assert.equal(result.isError, true);
 			assert.match(result.content[0].text, /GOOGLE_MAPS_API_KEY is not configured/);
 		}, harness);
@@ -2217,10 +2523,13 @@ test("calls Google Workspace through signed JWTs, fixed delegation, and a privat
 		const request = new Request(input, init);
 		const url = new URL(request.url);
 		assert.ok(!["sts.mtls.googleapis.com", "iamcredentials.googleapis.com"].includes(url.hostname), "Legacy federation must not be used.");
+
 		if (!["oauth2.googleapis.com", "gmail.googleapis.com"].includes(url.hostname)) {
 			return originalFetch(input, init);
 		}
+
 		requests.push(request.clone());
+
 		if (url.hostname === "oauth2.googleapis.com") {
 			const body = new URLSearchParams(await request.text());
 			assert.equal(body.get("grant_type"), "urn:ietf:params:oauth:grant-type:jwt-bearer");
@@ -2237,19 +2546,29 @@ test("calls Google Workspace through signed JWTs, fixed delegation, and a privat
 				"https://www.googleapis.com/auth/gmail.settings.basic",
 				"https://www.googleapis.com/auth/gmail.settings.sharing",
 			].sort());
+
 			if (rejectToken) return Response.json({ error_description: "do-not-expose-workspace-secret" }, { status: 400 });
+
 			return Response.json({ access_token: "test-google-workspace-token", expires_in: expiresIn });
 		}
+
 		assert.equal(request.headers.get("Authorization"), "Bearer test-google-workspace-token");
+
 		if (apiStatus === 204) return new Response(null, { status: 204 });
+
 		if (apiStatus === 302) return new Response(null, { status: 302, headers: { Location: "https://evil.example/steal" } });
+
 		return Response.json(apiPayload, { status: apiStatus, headers: { "Retry-After": "0" } });
 	};
+
 	const count = (hostname) => requests.filter((request) => new URL(request.url).hostname === hostname).length;
+
 	const call = (client, options) => client.callTool({ name: "code", arguments: {
 		code: `async () => await google.request(${JSON.stringify(options)})`,
 	} });
+
 	const profile = { service: "gmail", method: "GET", path: "/gmail/v1/users/me/profile" };
+
 	try {
 		await withMcpClient(undefined, async (client) => {
 			await t.test("rejects invalid services, external URLs, other users, traversal, and caller-selected credentials before authentication", async () => {
@@ -2269,12 +2588,14 @@ test("calls Google Workspace through signed JWTs, fixed delegation, and a privat
 					const result = await call(client, options);
 					assert.equal(result.isError, true, JSON.stringify(options));
 				}
+
 				assert.equal(requests.length, 0);
 			});
 			await t.test("deduplicates concurrent authentication and hides all credentials from MCP results", async () => {
 				const result = await client.callTool({ name: "code", arguments: {
 					code: `async () => await Promise.all([google.request(${JSON.stringify(profile)}), google.request(${JSON.stringify(profile)}), google.request(${JSON.stringify(profile)})])`,
 				} });
+
 				assert.equal(result.isError, undefined);
 				assert.deepEqual(result.structuredContent.result, Array(3).fill({ emailAddress: "joe@j1.io" }));
 				assert.equal(count("oauth2.googleapis.com"), 1);
@@ -2338,6 +2659,7 @@ test("calls Google Workspace through signed JWTs, fixed delegation, and a privat
 		});
 		await t.test("rejects invalid or mismatched service-account credentials without leaking them", async () => {
 			const before = requests.length;
+
 			for (const credentials of [
 				'{"private_key":"do-not-expose-key"',
 				JSON.stringify({ ...GOOGLE_CREDENTIALS, client_email: "other@example.com" }),
@@ -2345,6 +2667,7 @@ test("calls Google Workspace through signed JWTs, fixed delegation, and a privat
 				JSON.stringify({ ...GOOGLE_CREDENTIALS, private_key_id: "" }),
 			]) {
 				const server = createConciergeHarness(true, { GOOGLE_SERVICE_ACCOUNT_JSON: credentials });
+
 				try {
 					await server.listen();
 					await withMcpClient(undefined, async (client) => {
@@ -2357,6 +2680,7 @@ test("calls Google Workspace through signed JWTs, fixed delegation, and a privat
 					await server.close();
 				}
 			}
+
 			assert.equal(requests.length, before);
 		});
 	} finally {
@@ -2368,6 +2692,7 @@ test("shares bounded reliability behavior across connector operations", async (t
 	const run = async options => (await debugServer.getWorker("reliability-test").fetch("https://test.example/", {
 		method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(options),
 	})).json();
+
 	await t.test("shares request validation without widening provider contracts", async () => {
 		const contract = { methods: ["GET", "POST"], pathPrefix: "/api/" };
 		const args = { method: "GET", path: "/api/items", query: { flag: true, count: 2, name: "test" } };
@@ -2382,9 +2707,11 @@ test("shares bounded reliability behavior across connector operations", async (t
 		assert.equal(parsed.inputSchema.properties.query.additionalProperties.anyOf.some((entry) => entry.type === "array"), false);
 		const write = { ...args, method: "POST", body: { name: "test" } };
 		assert.deepEqual((await run({ action: "inputs", contract, args: write })).result, write);
+
 		for (const invalid of [null, [], "request", { ...args, extra: true }, { ...args, method: "PUT" }, { ...args, method: 1 }, { ...args, path: "/outside" }, { ...args, path: null }, { ...args, query: null }, { ...args, query: [] }, { ...args, query: { nested: {} } }, { ...args, query: { values: ["one"] } }, { ...args, body: null }]) {
 			assert.ok((await run({ action: "inputs", contract, args: invalid })).error, JSON.stringify(invalid));
 		}
+
 		const googleContract = { ...contract, queryArrays: true, extraKeys: ["service"] };
 		const googleArgs = { ...args, service: "gmail", query: { values: ["one", 2, true] } };
 		assert.deepEqual((await run({ action: "inputs", contract: googleContract, args: googleArgs })).result, googleArgs);
@@ -2399,9 +2726,11 @@ test("shares bounded reliability behavior across connector operations", async (t
 	await t.test("validates API URL boundaries and serializes finite scalar queries", async () => {
 		const allowed = await run({ action: "url", path: "/api/items", query: { tag: ["one", "two"], enabled: true } });
 		assert.equal(allowed.url, "https://example.com/api/items?tag=one&tag=two&enabled=true");
+
 		for (const path of ["https://evil.example/api/items", "/api/../../outside", "/api/%2e%2e/outside", "/api/a%2fb", "/api/items?token=evil", "/api/items#fragment", "/api/\\evil"]) {
 			assert.ok((await run({ action: "url", path })).error, path);
 		}
+
 		assert.ok((await run({ action: "url", path: "/api/items", query: { access_token: "evil" } })).error);
 	});
 	await t.test("bounds retries and does not replay ambiguous writes", async () => {
@@ -2464,6 +2793,7 @@ test("shares bounded reliability behavior across connector operations", async (t
 	});
 	await t.test("derives request headers and advertised MIME support from the response registry", async () => {
 		const originalFetch = globalThis.fetch;
+
 		try {
 			for (const format of ["json", "json-or-text", "json-or-image"]) {
 				const formats = await run({ action: "formats", format });
@@ -2473,19 +2803,24 @@ test("shares bounded reliability behavior across connector operations", async (t
 				]);
 				const supported = formats.types.filter((type) => type.kind === "json" || format === "json-or-image");
 				assert.equal(formats.accept, supported.map((type) => type.mimeType).join(", "));
+
 				for (const type of supported) assert.ok(formats.description.includes(type.mimeType));
+
 				if (format !== "json-or-image") assert.ok(!formats.description.includes("image/jpeg"));
 				globalThis.fetch = async (input, init) => {
 					const request = new Request(input, init);
 					assert.equal(request.headers.get("Accept"), formats.accept);
+
 					return Response.json({ unchanged: true });
 				};
+
 				assert.deepEqual((await run({ action: "request", format })).result, { unchanged: true });
 			}
 		} finally { globalThis.fetch = originalFetch; }
 	});
 	await t.test("rejects unsupported formats without buffering media or replaying successful writes", async () => {
 		const formats = await run({ action: "formats" });
+
 		for (const contentType of ["IMAGE/JPEG; filename=private-header", "image/png", "text/html", "application/octet-stream", "not a media type private-header"]) {
 			const result = await run({ action: "body", readOnly: false, body: "private-response-body", headers: { "Content-Type": contentType } });
 			assert.equal(result.cancelled, true);
@@ -2495,6 +2830,7 @@ test("shares bounded reliability behavior across connector operations", async (t
 			assert.ok(result.results[0].error.includes(`this connector accepts ${formats.description}.`));
 			assert.match(result.results[0].error, /retryable=false.*safe_to_replay=false.*outcome=succeeded/);
 			assert.doesNotMatch(JSON.stringify(result), /private-response-body|private-header|invalid JSON/);
+
 			if (contentType.startsWith("IMAGE")) assert.match(result.results[0].error, /\(image\/jpeg\)/);
 		}
 	});
@@ -2503,6 +2839,7 @@ test("shares bounded reliability behavior across connector operations", async (t
 			const result = await run({ action: "body", closeBody: true, body: '{"unchanged":true}', headers: contentType ? { "Content-Type": contentType } : {} });
 			assert.deepEqual(result.results[0].result, { unchanged: true });
 		}
+
 		const empty = await run({ action: "body", closeBody: true, body: "", headers: { "Content-Type": "text/plain" } });
 		assert.equal(empty.results[0].result, null);
 		const malformed = await run({ action: "body", closeBody: true, body: "private-response-body", headers: { "Content-Type": "application/json" } });
@@ -2541,16 +2878,25 @@ test("shares bounded reliability behavior across connector operations", async (t
 		let mode = "failure";
 		globalThis.fetch = async (input, init) => {
 			const request = new Request(input, init);
+
 			if (request.url !== "https://reliability.example/api") return originalFetch(input, init);
 			requests++;
+
 			if (mode === "redirect") return new Response(null, { status: 302, headers: { Location: "https://evil.example/credentials" } });
+
 			if (mode === "invalid") return new Response("not-json", { headers: { "Content-Type": "application/json" } });
+
 			if (mode === "html-failure") return new Response("private-error-body fixture-secret", { status: 503, headers: { "Content-Type": "text/html" } });
+
 			if (mode === "media") return new Response("private-image-body", { headers: { "Content-Type": "image/png; filename=fixture-secret" } });
+
 			if (mode === "authentication") return Response.json({ message: "fixture-secret private-token-body" }, { status: 401 });
+
 			if (mode === "success") return Response.json({ unchanged: true });
+
 			return Response.json({ message: "Rejected fixture-secret", code: "fixture-secret" }, { status: 503, headers: { "X-Request-Id": "request-123" } });
 		};
+
 		try {
 			const failed = await run({ action: "request" });
 			assert.equal(requests, 3);
@@ -2615,38 +2961,57 @@ test("applies shared reliability to real MCP connector calls without replaying C
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
 		const host = new URL(request.url).hostname;
+
 		if (host === "oauth2.googleapis.com") {
 			authCalls++;
+
 			if (mode === "google-auth-failure") return Response.json({ error_description: "private signed assertion must not escape" }, { status: 503 });
+
 			return Response.json({ access_token: "test-google-workspace-token", expires_in: 3600 });
 		}
+
 		if (host !== "gmail.googleapis.com") return originalFetch(input, init);
 		googleCalls++;
 		assert.equal(request.headers.get("Authorization"), "Bearer test-google-workspace-token");
+
 		if (mode === "google-invalid") return new Response("invalid-json", { headers: { "Content-Type": "application/json" } });
+
 		if (mode === "google-auth-invalidate") return Response.json({ error: { message: "rejected token" } }, { status: 401 });
+
 		if (mode === "google-permission") return Response.json({ error: { message: "private forbidden body", errors: [{ reason: "domainPolicy" }] } }, { status: 403 });
+
 		if (mode === "google-rate-write") return Response.json({ error: { message: "rate limit", errors: [{ reason: "userRateLimitExceeded" }] } }, { status: 403 });
+
 		if (mode === "google-rate" && googleCalls === 1) return Response.json({ error: { errors: [{ reason: "rateLimitExceeded" }] } }, { status: 403 });
+
 		if (mode.startsWith("google-")) return Response.json({ emailAddress: "joe@j1.io" });
 		calls++;
+
 		if (mode === "parallel") {
 			active++; peak = Math.max(peak, active);
 			await new Promise(resolve => setTimeout(resolve, 20));
 			active--;
+
 			return Response.json({ ok: true });
 		}
+
 		if (request.method === "POST") {
 			writes++;
+
 			if (mode === "uncertain-write") return Response.json({ error: { message: "try again" } }, { status: 503 });
+
 			return Response.json({ created: true });
 		}
+
 		if (mode === "retry" && calls < 3 || mode === "sequence" && calls === 2) return Response.json({ error: { message: "temporary failure" } }, { status: 503 });
+
 		return Response.json({ ok: true });
 	};
+
 	const read = "google.request({ service: 'gmail', method: 'GET', path: '/gmail/v1/users/me/profile' })";
 	const write = "google.request({ service: 'gmail', method: 'POST', path: '/gmail/v1/users/me/messages/send', body: { raw: 'test' } })";
 	const invoke = (client, code) => client.callTool({ name: "code", arguments: { code } });
+
 	try {
 		await withMcpClient(undefined, async client => {
 			await t.test("retries reads while preserving successful tool output", async () => {
@@ -2760,13 +3125,16 @@ async function withMcpClient(options, run, server = debugServer) {
 		{ name: "concierge-integration-test", version: "1.0.0" },
 		options,
 	);
+
 	const worker = server.getWorker("concierge");
+
 	const transport = new StreamableHTTPClientTransport(debugMcpUrl, {
 		fetch: (input, init) => worker.fetch(input, init),
 	});
 
 	try {
 		await client.connect(transport);
+
 		return await run(client);
 	} finally {
 		await client.close();
@@ -2775,8 +3143,10 @@ async function withMcpClient(options, run, server = debugServer) {
 
 async function waitFor(check, description) {
 	const deadline = performance.now() + 5_000;
+
 	for (;;) {
 		const result = check();
+
 		if (result !== undefined) return result;
 		assert.ok(performance.now() < deadline, `Timed out waiting for ${description}.`);
 		await new Promise((resolve) => setTimeout(resolve, 25));
@@ -2786,6 +3156,7 @@ async function waitFor(check, description) {
 function consentForm(html, decision) {
 	const match = html.match(/name="handle" value="([^"]+)"/);
 	assert.ok(match, "Missing consent handle");
+
 	return new URLSearchParams({ handle: match[1], decision });
 }
 

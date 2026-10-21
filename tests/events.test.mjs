@@ -16,6 +16,7 @@ const WEBHOOK = "https://concierge.j1.io/webhooks/twilio/messages";
 const secret = () => `whsec_${randomBytes(32).toString("base64")}`;
 const message = (overrides = {}) => ({ AccountSid: ACCOUNT, MessageSid: `SM${randomBytes(16).toString("hex")}`, From: FROM, To: TO, Body: "A private incoming fixture message", NumMedia: "0", ...overrides });
 const params = (url, signingKey = secret(), args = {}) => ({ name: "twilio.message.received", arguments: args, delivery: { mode: "webhook", url, secret: signingKey } });
+
 const harness = createTestHarness({
 	root: fileURLToPath(new URL("..", import.meta.url)),
 	workers: [{
@@ -33,7 +34,9 @@ const harness = createTestHarness({
 		},
 	}],
 });
+
 before(async () => { await harness.listen(); });
+
 after(async () => { await harness.close(); });
 
 async function rpc(method, args = {}, path = "/debug/mcp", server = harness) {
@@ -46,23 +49,30 @@ async function rpc(method, args = {}, path = "/debug/mcp", server = harness) {
 			"io.modelcontextprotocol/clientCapabilities": {},
 		} } }),
 	});
+
 	if (response.status === 401) return { status: 401 };
 	const body = await response.text();
+
 	return response.headers.get("Content-Type")?.includes("text/event-stream")
 		? JSON.parse(body.split("\n").find((line) => line.startsWith("data:")).slice(5)) : JSON.parse(body);
 }
+
 async function incoming(fields, overrides = {}) {
 	return harness.getWorker("concierge").fetch(WEBHOOK, {
 		method: "POST", body: new URLSearchParams(fields),
 		headers: { "Content-Type": "application/x-www-form-urlencoded", "X-Twilio-Signature": getExpectedTwilioSignature(WEBHOOK_KEY_SECRET, WEBHOOK, fields), "X-Twilio-Webhooks-Signature-Settings": SIGNING_SETTINGS, ...overrides },
 	});
 }
+
 async function fixture(instance, input) {
 	const response = await harness.getWorker("event-fixture").fetch("https://fixture.test", { method: "POST", body: JSON.stringify({ instance, ...input }) });
+
 	return response.json();
 }
+
 async function eventually(check) {
 	const deadline = Date.now() + 12_000;
+
 	while (!check()) {
 		assert.ok(Date.now() < deadline, "Timed out waiting for event delivery");
 		await new Promise((resolve) => setTimeout(resolve, 25));
@@ -80,6 +90,7 @@ test("MCP Events discovers native filters separately from tools and stays OAuth-
 	assert.match(listed.result.events[0].description, /empty arguments/);
 	assert.match(listed.result.events[0].description, /untrusted data/);
 	assert.deepEqual((await rpc("tools/list")).result.tools.map(({ name }) => name), ["code"]);
+
 	for (const method of ["events/list", "events/subscribe", "events/unsubscribe"]) assert.equal((await rpc(method, {}, "/mcp")).status, 401);
 	assert.equal((await rpc("events/list", { cursor: "unknown" })).error.code, -32602);
 	assert.equal((await rpc("events/poll")).error.code, -32601);
@@ -88,14 +99,17 @@ test("MCP Events discovers native filters separately from tools and stays OAuth-
 test("event descriptors use the plain object schema subset accepted by ChatGPT", async () => {
 	const { events } = (await rpc("events/list")).result;
 	assert.ok(events.length > 0);
+
 	for (const event of events) {
 		for (const schema of [event.inputSchema, event.payloadSchema]) {
 			assert.equal(schema.type, "object");
+
 			for (const key of ["$schema", "oneOf", "anyOf", "allOf", "not"]) {
 				assert.equal(Object.hasOwn(schema, key), false, `${event.name} must not expose ${key}`);
 			}
 		}
 	}
+
 	const [event] = events;
 	assert.equal(event.inputSchema.additionalProperties, false);
 	assert.deepEqual(event.inputSchema.required ?? [], []);
@@ -106,13 +120,16 @@ test("event descriptors use the plain object schema subset accepted by ChatGPT",
 test("Twilio ingress verifies signatures over all parameters and rejects unsafe requests", async () => {
 	const fields = message({ FutureTwilioParameter: "signed too" });
 	assert.equal((await incoming(fields, { "X-Twilio-Signature": "invalid" })).status, 403);
+
 	const tampered = await harness.getWorker("concierge").fetch(WEBHOOK, {
 		method: "POST", body: new URLSearchParams({ ...fields, Body: "tampered" }),
 		headers: { "Content-Type": "application/x-www-form-urlencoded", "X-Twilio-Signature": getExpectedTwilioSignature(WEBHOOK_KEY_SECRET, WEBHOOK, fields), "X-Twilio-Webhooks-Signature-Settings": SIGNING_SETTINGS },
 	});
+
 	assert.equal(tampered.status, 403);
 	assert.equal((await incoming(message({ AccountSid: `AC${"c".repeat(32)}` }))).status, 403);
 	assert.equal((await incoming(message(), { "X-Twilio-Webhooks-Signature-Settings": "key=unexpected,algorithm=HMAC_SHA256" })).status, 403);
+
 	for (const settings of [
 		"", `key=${WEBHOOK_KEY_ID}`, "algorithm=HMAC_SHA1",
 		`key=webhooks_sharedkey_${"b".repeat(26)},algorithm=HMAC_SHA1`,
@@ -123,11 +140,14 @@ test("Twilio ingress verifies signatures over all parameters and rejects unsafe 
 	]) {
 		assert.equal((await incoming(message(), { "X-Twilio-Webhooks-Signature-Settings": settings })).status, 403, settings);
 	}
+
 	assert.equal((await incoming(fields, { "X-Twilio-Signature": getExpectedTwilioSignature("account-auth-token-not-the-shared-key", WEBHOOK, fields) })).status, 403);
+
 	const legacy = await harness.getWorker("concierge").fetch(WEBHOOK, {
 		method: "POST", body: new URLSearchParams(fields),
 		headers: { "Content-Type": "application/x-www-form-urlencoded", "X-Twilio-Signature": getExpectedTwilioSignature(WEBHOOK_KEY_SECRET, WEBHOOK, fields) },
 	});
+
 	assert.equal(legacy.status, 403, "A valid SHA1 signature without SharedKey settings must not fall back to legacy authentication");
 	assert.equal((await incoming(message({ To: "not-a-number" }))).status, 400);
 	assert.equal((await incoming(message({ Body: "x".repeat(70_000) }))).status, 413);
@@ -148,14 +168,17 @@ test("missing or malformed SharedKey configuration disables Events and rejects i
 			configPath: "./wrangler.jsonc", bindingOverrides: { BROWSER: "browser-mock" }, vars: { CONCIERGE_DEBUG: "true" },
 			secrets: { COOKIE_ENCRYPTION_KEY: "test-cookie-key", TWILIO_ACCOUNT_SID: ACCOUNT, ...signing },
 		}, { config: { name: "browser-mock", main: "./tests/fixtures/browser-worker.mjs", compatibility_date: "2026-07-15" } }] });
+
 		try {
 			await server.listen();
 			assert.equal((await rpc("server/discover", {}, "/debug/mcp", server)).result.capabilities.events, undefined);
 			const fields = message();
+
 			const response = await server.getWorker("concierge").fetch(WEBHOOK, {
 				method: "POST", body: new URLSearchParams(fields),
 				headers: { "Content-Type": "application/x-www-form-urlencoded", "X-Twilio-Signature": getExpectedTwilioSignature(WEBHOOK_KEY_SECRET, WEBHOOK, fields), "X-Twilio-Webhooks-Signature-Settings": SIGNING_SETTINGS },
 			});
+
 			assert.equal(response.status, 503);
 			assert.equal(await response.text(), "");
 		} finally { await server.close(); }
@@ -165,22 +188,28 @@ test("missing or malformed SharedKey configuration disables Events and rejects i
 test("one signing key and endpoint support independent subscriptions for multiple Twilio numbers", async () => {
 	const original = globalThis.fetch;
 	const deliveries = [];
+
 	const subscriptions = [
 		params("https://receiver.example.com/number-one", secret(), { To: TO }),
 		params("https://receiver.example.com/number-two", secret(), { To: "+12025550103" }),
 	];
+
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
 		const subscription = subscriptions.find((item) => item.delivery.url === request.url);
 		assert.ok(subscription);
 		const body = await request.text();
 		const event = new Webhook(subscription.delivery.secret).verify(body, Object.fromEntries(request.headers));
+
 		if (event.type === "verification") return Response.json({ challenge: event.challenge });
 		deliveries.push({ url: request.url, To: event.data.To });
+
 		return new Response(null, { status: 204 });
 	};
+
 	try {
 		for (const subscription of subscriptions) assert.equal((await rpc("events/subscribe", subscription)).error, undefined);
+
 		for (const subscription of subscriptions) assert.equal((await incoming(message({ To: subscription.arguments.To }))).status, 200);
 		await eventually(() => deliveries.length === 2);
 		assert.deepEqual(deliveries.sort((a, b) => a.url.localeCompare(b.url)), subscriptions.map((item) => ({ url: item.delivery.url, To: item.arguments.To })));
@@ -189,6 +218,7 @@ test("one signing key and endpoint support independent subscriptions for multipl
 			const { secret: _, ...delivery } = subscription.delivery;
 			await rpc("events/unsubscribe", { ...subscription, delivery });
 		}
+
 		globalThis.fetch = original;
 	}
 });
@@ -196,38 +226,47 @@ test("one signing key and endpoint support independent subscriptions for multipl
 test("empty and sender-only subscriptions receive matching messages across destination numbers", async () => {
 	const original = globalThis.fetch;
 	const deliveries = [];
+
 	const subscriptions = [
 		params("https://receiver.example.com/all-messages"),
 		params("https://receiver.example.com/from-only", secret(), { From: FROM }),
 	];
+
 	const messages = [
 		message(),
 		message({ To: "+12025550103" }),
 		message({ From: "+12025550104" }),
 		message({ To: "+12025550103", From: "+12025550104" }),
 	];
+
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
 		const subscription = subscriptions.find((item) => item.delivery.url === request.url);
 		assert.ok(subscription);
 		const event = new Webhook(subscription.delivery.secret).verify(await request.text(), Object.fromEntries(request.headers));
+
 		if (event.type === "verification") return Response.json({ challenge: event.challenge });
 		deliveries.push({ url: request.url, messageSid: event.data.MessageSid });
+
 		return new Response(null, { status: 204 });
 	};
+
 	try {
 		for (const subscription of subscriptions) assert.equal((await rpc("events/subscribe", subscription)).error, undefined);
+
 		for (const fields of messages) assert.equal((await incoming(fields)).status, 200);
 		await eventually(() => deliveries.length === 6);
+
 		for (const [index, subscription] of subscriptions.entries()) {
-			assert.deepEqual(deliveries.filter((item) => item.url === subscription.delivery.url).map((item) => item.messageSid).sort(),
-				messages.filter((item) => index === 0 || item.From === FROM).map((item) => item.MessageSid).sort());
+			assert.deepEqual(deliveries.flatMap((item) => item.url === subscription.delivery.url ? [item.messageSid] : []).sort(),
+				messages.flatMap((item) => index === 0 || item.From === FROM ? [item.MessageSid] : []).sort());
 		}
 	} finally {
 		for (const subscription of subscriptions) {
 			const { secret: _, ...delivery } = subscription.delivery;
 			await rpc("events/unsubscribe", { ...subscription, delivery });
 		}
+
 		globalThis.fetch = original;
 	}
 });
@@ -235,17 +274,23 @@ test("empty and sender-only subscriptions receive matching messages across desti
 test("rejects unknown events, invalid filters, secrets, non-public callbacks and failed challenges", async () => {
 	const original = globalThis.fetch;
 	let requests = 0;
-	globalThis.fetch = async () => { requests++; return Response.json({ challenge: "wrong" }); };
+	globalThis.fetch = async () => { requests++;
+
+ return Response.json({ challenge: "wrong" }); };
+
 	try {
 		for (const url of ["http://receiver.example.com", "https://localhost", "https://127.0.0.1", "https://[::1]", "https://a.local", "https://receiver.example.com:444", "https://user:pass@receiver.example.com", "https://receiver.example.com/#fragment"]) {
 			assert.equal((await rpc("events/subscribe", params(url))).error.code, -32602, url);
 		}
+
 		assert.equal((await rpc("events/subscribe", { ...params("https://receiver.example.com/invalid"), name: "unknown" })).error.code, -32011);
 		assert.equal((await rpc("events/subscribe", params("https://receiver.example.com/invalid", "bad-secret"))).error.code, -32602);
 		assert.equal((await rpc("events/subscribe", params("https://receiver.example.com/invalid", secret(), { To: TO, apiKey: "not-allowed" }))).error.code, -32602);
+
 		for (const args of [{ To: "not-a-number" }, { From: "not-a-number" }, { To: "" }, { To: null }]) {
 			assert.equal((await rpc("events/subscribe", params("https://receiver.example.com/invalid", secret(), args))).error.code, -32602);
 		}
+
 		assert.equal(requests, 0);
 		assert.equal((await rpc("events/subscribe", params("https://receiver.example.com/invalid"))).error.code, -32015);
 		assert.equal(requests, 1);
@@ -266,13 +311,20 @@ test("delivers a real MCP subscription from signed Twilio ingress, filters and d
 			assert.equal(request.headers.has("Authorization"), false);
 			const body = await request.text();
 			const event = new Webhook(key).verify(body, Object.fromEntries(request.headers));
-			if (event.type === "verification") { challenges++; return Response.json({ challenge: event.challenge }); }
+
+			if (event.type === "verification") { challenges++;
+
+ return Response.json({ challenge: event.challenge }); }
+
 			deliveries.push({ body, event, subscription: request.headers.get("X-MCP-Subscription-Id") });
+
 			return new Response(null, { status: 204 });
 		} catch (error) { callbackFailure = error; throw error; }
 	};
+
 	try {
 		const created = await rpc("events/subscribe", subscription);
+
 		if (callbackFailure) throw callbackFailure;
 		assert.equal(created.error, undefined);
 		assert.equal(created.result.cursor, null);
@@ -284,6 +336,7 @@ test("delivers a real MCP subscription from signed Twilio ingress, filters and d
 		assert.equal((await incoming(fields)).status, 200);
 		assert.equal((await incoming(fields)).status, 200);
 		await eventually(() => callbackFailure || deliveries.length === 1);
+
 		if (callbackFailure) throw callbackFailure;
 		assert.equal(deliveries[0].subscription, created.result.id);
 		assert.equal(deliveries[0].event.name, "twilio.message.received");
@@ -292,11 +345,13 @@ test("delivers a real MCP subscription from signed Twilio ingress, filters and d
 		assert.doesNotMatch(deliveries[0].body, new RegExp(`${WEBHOOK_KEY_ID}|${WEBHOOK_KEY_SECRET}|whsec_|test-api`));
 		assert.equal((await incoming(message({ From: "+12025550103" }))).status, 200);
 		const { secret: _, ...delivery } = subscription.delivery;
+
 		for (let i = 0; i < 2; i++) {
 			const result = await rpc("events/unsubscribe", { ...subscription, delivery });
 			assert.equal(result.error, undefined);
 			assert.deepEqual(Object.keys(result.result).filter((key) => !["_meta", "resultType"].includes(key)), []);
 		}
+
 		assert.equal((await incoming(message())).status, 200);
 		assert.equal(deliveries.length, 1);
 	} finally { globalThis.fetch = original; }
@@ -307,8 +362,10 @@ test("callback redirects are rejected without sending a verification to another 
 	const visited = [];
 	globalThis.fetch = async (input) => {
 		visited.push(new Request(input).url);
+
 		return new Response(null, { status: 302, headers: { Location: "https://another.example.com/stolen" } });
 	};
+
 	try {
 		const result = await rpc("events/subscribe", params("https://receiver.example.com/redirect"));
 		assert.equal(result.error.code, -32015);
@@ -319,6 +376,7 @@ test("callback redirects are rejected without sending a verification to another 
 test("subscription filters, idempotent removal and finite lifetimes persist independently of a service instance", async () => {
 	const original = globalThis.fetch;
 	globalThis.fetch = async (input, init) => Response.json({ challenge: JSON.parse(await new Request(input, init).text()).challenge });
+
 	try {
 		const subscription = params("https://receiver.example.com/filter", secret(), { To: TO, From: FROM });
 		const start = Date.now();
@@ -348,10 +406,13 @@ test("persistent delivery state handles retries, secret rotation, expiry, owners
 		const request = new Request(input, init);
 		const body = await request.text();
 		const parsed = JSON.parse(body);
+
 		if (parsed.type === "verification") return Response.json({ challenge: parsed.challenge });
 		attempts.push({ body, headers: Object.fromEntries(request.headers) });
+
 		return new Response(null, { status });
 	};
+
 	try {
 		const created = await fixture("state", { action: "subscribe", params: subscription });
 		assert.ok(created.id);
@@ -388,6 +449,7 @@ test("persistent delivery state handles retries, secret rotation, expiry, owners
 		assert.equal(revoked.subscriptions.length, 0);
 		assert.equal(revoked.jobs.length, 0);
 		assert.equal(attempts.length, 2);
+
 		for (const terminalStatus of [410, 413]) {
 			status = terminalStatus;
 			await fixture(`terminal-${status}`, { action: "subscribe", params: subscription });
@@ -404,21 +466,26 @@ test("bounds subscriptions and delivery attempts while honoring retry cooldowns"
 	let attempts = 0;
 	globalThis.fetch = async (input, init) => {
 		const event = JSON.parse(await new Request(input, init).text());
+
 		if (event.type === "verification") return Response.json({ challenge: event.challenge });
 		attempts++;
+
 		return new Response(null, { status: 429, headers: { "Retry-After": "60" } });
 	};
+
 	try {
 		for (let i = 0; i < 32; i++) {
 			const created = await fixture("limits", { action: "subscribe", params: params(`https://receiver.example.com/limit-${i}`) });
 			assert.ok(created.id);
 		}
+
 		assert.equal((await fixture("limits", { action: "subscribe", params: params("https://receiver.example.com/limit-33") })).code, -32603);
 		await fixture("bounded-retry", { action: "subscribe", params: params("https://receiver.example.com/bounded-retry") });
 		await fixture("bounded-retry", { action: "publish", message: message() });
 		const now = Date.now();
 		const first = await fixture("bounded-retry", { action: "deliver" });
 		assert.ok(first.jobs[0].next_attempt >= now + 60_000);
+
 		for (let i = 0; i < 5; i++) await fixture("bounded-retry", { action: "deliver" });
 		assert.equal(attempts, 6);
 		assert.equal((await fixture("bounded-retry", { action: "state" })).jobs.length, 0);

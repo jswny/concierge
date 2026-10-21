@@ -20,12 +20,15 @@ const RESPONSE_FORMATS = {
 } as const;
 
 export type ResponseFormat = keyof typeof RESPONSE_FORMATS;
+
 type ResponseType = typeof RESPONSE_TYPES[keyof typeof RESPONSE_TYPES];
+
 export type ImageMimeType = Extract<ResponseType, { kind: "image" }>["mimeType"];
 
 /** Parameters and malformed header values must never appear in connector errors. */
 export function parseMediaType(contentType: string | null): string | undefined {
 	const mediaType = contentType?.split(";", 1)[0].trim().toLowerCase();
+
 	return mediaType && mediaType.length <= 127 &&
 		/^[-!#$%&'*+.^_`|~0-9a-z]+\/[-!#$%&'*+.^_`|~0-9a-z]+$/.test(mediaType)
 		? mediaType : undefined;

@@ -8,6 +8,7 @@ import { apiRequestSchema, apiScalarSchema, parseApiRequest, toToolInputSchema }
 
 const API_ORIGIN = "https://api.twilio.com";
 const API_PREFIX = "/2010-04-01/Accounts/";
+
 const requestSchema = apiRequestSchema({
 	methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
 	pathPrefix: API_PREFIX,
@@ -18,6 +19,7 @@ const requestSchema = apiRequestSchema({
 	body: z.record(z.string(), z.union([apiScalarSchema, z.array(apiScalarSchema)]))
 		.optional().describe("Native form parameters, preserving Twilio's case-sensitive names such as To, From, Body, MediaUrl. Arrays produce repeated form fields. Stringify nested values only where the endpoint documentation requires a JSON string."),
 });
+
 const requestInputSchema = toToolInputSchema(requestSchema);
 
 export class TwilioConnector extends ObservedConnector<Env> {
@@ -45,35 +47,44 @@ export class TwilioConnector extends ObservedConnector<Env> {
 				execute: async (args) => {
 					const options = parseApiRequest(requestSchema, args);
 					const { TWILIO_ACCOUNT_SID: accountSid, TWILIO_API_KEY_SID: keySid, TWILIO_API_KEY_SECRET: secret } = this.env;
+
 					if (!accountSid || !keySid || !secret) {
 						throw new Error("TWILIO_ACCOUNT_SID, TWILIO_API_KEY_SID and TWILIO_API_KEY_SECRET must be configured.");
 					}
+
 					if (!/^AC[0-9a-f]{32}$/i.test(accountSid) || !/^SK[0-9a-f]{32}$/i.test(keySid)) {
 						throw new Error("Twilio requires a valid Account SID and API Key SID.");
 					}
+
 					const path = options.path.replace("{AccountSid}", accountSid);
 					const prefix = `${API_PREFIX}${accountSid}/`;
 					const url = createApiUrl(API_ORIGIN, prefix, path, options.query);
+
 					if (/%25/i.test(path) || url.pathname.includes("//")) {
 						throw new Error("Twilio paths cannot contain double encoding or empty path segments.");
 					}
+
 					if (/^(Keys|SigningKeys|Tokens)(\/|\.json$)/i.test(decodeURIComponent(url.pathname.slice(prefix.length)))) {
 						throw new Error("Twilio credential-management endpoints are not exposed.");
 					}
+
 					const body = options.body === undefined ? undefined : new URLSearchParams();
+
 					if (body) for (const [key, value] of Object.entries(options.body ?? {})) {
 						for (const item of Array.isArray(value) ? value : [value]) body.append(key, String(item));
 					}
+
+					const headers = new Headers({ Authorization: `Basic ${Buffer.from(`${keySid}:${secret}`).toString("base64")}` });
+
+					if (body) headers.set("Content-Type", "application/x-www-form-urlencoded");
+
 					return this.requests.request({
 						connector: "Twilio",
 						operation: "request",
 						readOnly: options.method === "GET",
 						url,
 						method: options.method,
-						headers: {
-							Authorization: `Basic ${Buffer.from(`${keySid}:${secret}`).toString("base64")}`,
-							...(body ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
-						},
+						headers,
 						body,
 						sensitiveValues: [keySid, secret],
 						classifyError: classifyTwilioError,
@@ -86,6 +97,7 @@ export class TwilioConnector extends ObservedConnector<Env> {
 
 function classifyTwilioError(_status: number, payload: unknown): ApiFailure {
 	const error = isRecord(payload) ? payload : {};
+
 	return {
 		message: typeof error.message === "string" ? error.message : undefined,
 		code: typeof error.code === "number" || typeof error.code === "string" ? String(error.code) : undefined,

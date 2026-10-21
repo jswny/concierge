@@ -7,6 +7,7 @@ import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../conn
 
 const API_ORIGIN = "https://api.exa.ai";
 const READ_ONLY_POST_PATHS = new Set(["/search", "/contents", "/findSimilar", "/answer"]);
+
 const requestSchema = apiRequestSchema({
 	methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
 	pathPrefix: "/",
@@ -18,6 +19,7 @@ const requestSchema = apiRequestSchema({
 		ctx.addIssue({ code: "custom", message: "Exa streaming responses are not supported; omit stream or set it to false." });
 	}
 });
+
 const requestInputSchema = toToolInputSchema(requestSchema);
 
 export class ExaConnector extends ObservedConnector<Env> {
@@ -46,10 +48,13 @@ export class ExaConnector extends ObservedConnector<Env> {
 				execute: async (args) => {
 					const options = parseApiRequest(requestSchema, args);
 					const url = createApiUrl(API_ORIGIN, "/", options.path, options.query);
+
 					if (/%25/i.test(options.path) || url.pathname.includes("//")) {
 						throw new Error("Exa paths cannot contain double encoding or empty path segments.");
 					}
+
 					if (!this.env.EXA_API_KEY) throw new Error("EXA_API_KEY is not configured.");
+
 					return this.requests.request({
 						connector: "Exa",
 						operation: "request",
@@ -69,6 +74,7 @@ export class ExaConnector extends ObservedConnector<Env> {
 function classifyExaError(_status: number, payload: unknown): ApiFailure {
 	const error = isRecord(payload) ? payload : {};
 	const detail = isRecord(error.error) ? error.error : {};
+
 	return {
 		message: typeof error.error === "string" ? error.error : typeof detail.message === "string" ? detail.message : undefined,
 		code: typeof error.tag === "string" ? error.tag : typeof detail.code === "string" ? detail.code : undefined,

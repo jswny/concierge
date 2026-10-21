@@ -35,6 +35,7 @@ type DebugEnv = Env & {
 };
 
 type ImageContent = { type: "image"; mimeType: string; data: string };
+
 type CodeToolResult = {
 	content: Array<{ text: string; type: "text" } | ImageContent>;
 	isError?: boolean;
@@ -42,6 +43,7 @@ type CodeToolResult = {
 };
 
 const MCP_ALLOWED_HOSTNAMES = ["concierge.j1.io", "localhost", "127.0.0.1", "[::1]"];
+
 const MCP_ICONS = [{
 	src: "https://concierge.j1.io/assets/concierge.png",
 	mimeType: "image/png",
@@ -62,13 +64,17 @@ function createConciergeServer(
 ) {
 	const images = new ConnectorImages();
 	const usage = new UsageLog();
+
 	const server = new McpServer({
 		name: "Concierge MCP",
 		version: "1.0.0",
 		icons: MCP_ICONS,
 	});
+
 	server.server.registerCapabilities({ tools: { listChanged: false } });
+
 	if (hasTwilioWebhookKey(env)) registerEventMethods(server, [twilioMessageEvents], events, eventOwner);
+
 	const runtime = createCodemodeRuntime({
 		connectors: [
 			new CloudflareConnector(ctx, env, requests, usage),
@@ -81,6 +87,7 @@ function createConciergeServer(
 		ctx,
 		executor: new DynamicWorkerExecutor({ loader: env.LOADER }),
 	});
+
 	const codeToolDescription = runtime.tool({
 		connectorHints: {
 			cloudflare: "Read live rendered public webpages as Markdown with source metadata, bounded loading controls and continuation reads through Cloudflare Browser Run. Rendering-result caching is disabled; this is not an interactive or logged-in browser.",
@@ -130,6 +137,7 @@ function createConciergeServer(
 
 function createConciergeCodeToolDescription(defaultDescription: string) {
 	const withoutSnippets = removeMarkdownSection(defaultDescription, "Snippets");
+
 	const lines = withoutSnippets
 		.split("\n")
 		.filter((line) => !line.startsWith("- Some methods require approval."))
@@ -141,6 +149,7 @@ function createConciergeCodeToolDescription(defaultDescription: string) {
 				.replaceAll(" and saved snippets", "")
 				.replace('codemode.search("short intent phrase")', 'codemode.search("short method capability")'),
 		);
+
 	const withToolDiscovery = appendMarkdownSection(
 		lines.join("\n").trim(),
 		"Tool Discovery",
@@ -166,6 +175,7 @@ function createConciergeCodeToolDescription(defaultDescription: string) {
 			"Do not treat truncated output as complete or reuse a truncated identifier or cursor. Retrieve a smaller result instead; output truncation does not undo any earlier writes.",
 		].join("\n"),
 	);
+
 	return appendMarkdownSection(
 		withOutputFormat,
 		"Failure Recovery",
@@ -179,11 +189,13 @@ function createConciergeCodeToolDescription(defaultDescription: string) {
 function removeMarkdownSection(markdown: string, heading: string) {
 	const marker = `\n## ${heading}\n`;
 	const start = markdown.indexOf(marker);
+
 	if (start === -1) {
 		return markdown;
 	}
 
 	const next = markdown.indexOf("\n## ", start + marker.length);
+
 	if (next === -1) {
 		return markdown.slice(0, start).trimEnd();
 	}
@@ -200,6 +212,7 @@ function formatCodeToolOutput(output: ProxyToolOutput, imageStore: ConnectorImag
 		try {
 			const { result, images } = prepareImageOutput(output.result, output.executionId, imageStore);
 			const bounded = truncateResult(result);
+
 			return {
 				content: [{ text: stringifyToolResult(bounded), type: "text" }, ...images],
 				structuredContent: { result: normalizeStructuredResult(bounded) },
@@ -233,24 +246,32 @@ function formatCodeToolOutput(output: ProxyToolOutput, imageStore: ConnectorImag
 function prepareImageOutput(value: unknown, executionId: string, imageStore: ConnectorImages) {
 	const images: ImageContent[] = [];
 	let totalBytes = 0;
+
 	// Extract before upstream text truncation so binary data is neither clipped nor duplicated in JSON.
 	const json = JSON.stringify(value, (_key, nested: unknown) => {
 		if (!isImageReference(nested)) return nested;
 		const image = imageStore.resolve(executionId, nested);
 		totalBytes += image.data.byteLength;
+
 		if (images.length >= 4 || totalBytes > 4 * 1024 * 1024) {
 			throw new Error("Image output limit or signature check failed.");
 		}
+
 		images.push({ type: "image", mimeType: image.mimeType, data: Buffer.from(image.data).toString("base64") });
+
 		return { type: "image", mimeType: image.mimeType, byteLength: image.data.byteLength, contentIndex: images.length };
 	});
-	return { result: json === undefined ? undefined : JSON.parse(json) as unknown, images };
+
+	const result: unknown = json === undefined ? undefined : JSON.parse(json);
+
+	return { result, images };
 }
 
 function stringifyToolResult(result: unknown) {
 	if (typeof result === "string") {
 		return result;
 	}
+
 	if (result === undefined) {
 		return "";
 	}
@@ -268,7 +289,9 @@ function normalizeStructuredResult(result: unknown) {
 
 async function handleMcpRequest(request: Request, env: DebugEnv) {
 	const bounded = await boundMcpRequest(request);
+
 	if (bounded instanceof Response) return bounded;
+
 	return env.CONCIERGE_MCP.getByName("default").fetch(bounded);
 }
 
@@ -279,12 +302,16 @@ export class ConciergeMcpRuntime extends DurableObject<DebugEnv> {
 		if (owner.grantId === "local-debug") return this.env.CONCIERGE_DEBUG === "true" && owner.userId === "local-debug";
 		const oauth = getOAuthApi(oauthOptions, this.env);
 		let cursor: string | undefined;
+
 		for (let page = 0; page < 16; page++) {
 			const grants = await oauth.listUserGrants(owner.userId, { limit: 100, cursor });
+
 			if (grants.items.some((grant) => grant.id === owner.grantId && grant.clientId === owner.clientId && (!grant.expiresAt || grant.expiresAt * 1000 > Date.now()))) return true;
+
 			if (!grants.cursor) return false;
 			cursor = grants.cursor;
 		}
+
 		return false;
 	});
 
@@ -294,23 +321,24 @@ export class ConciergeMcpRuntime extends DurableObject<DebugEnv> {
 	fetch(request: Request) {
 		const pathname = new URL(request.url).pathname;
 		const route = pathname === "/debug/mcp" ? "/debug/mcp" : "/mcp";
+
 		const eventOwner = async (): Promise<EventOwner> => {
 			if (route === "/debug/mcp" && this.env.CONCIERGE_DEBUG === "true") {
 				return { userId: "local-debug", clientId: "local-debug", grantId: "local-debug", expiresAt: Date.now() + 60 * 60_000 };
 			}
+
 			const bearer = /^Bearer ([^\s]+)$/i.exec(request.headers.get("Authorization") ?? "")?.[1];
 			const token = bearer ? await getOAuthApi(oauthOptions, this.env).unwrapToken<Record<string, unknown>>(bearer) : null;
+
 			if (!token || ![token.audience].flat().includes("https://concierge.j1.io/mcp")) throw new Error("Authentication required.");
+
 			return { userId: token.userId, clientId: token.grant.clientId, grantId: token.grantId, expiresAt: token.expiresAt * 1000 };
 		};
+
 		return createMcpHandler(() => createConciergeServer(this.ctx, this.env, this.googleAuth, this.requests, this.events, eventOwner), {
 			allowedHostnames: MCP_ALLOWED_HOSTNAMES,
 			route,
-		})(
-			request,
-			this.env,
-			this.ctx as unknown as ExecutionContext,
-		);
+		}).fetch(request);
 	}
 }
 
@@ -335,14 +363,17 @@ const oauthOptions: OAuthProviderOptions<DebugEnv> = {
 	resourceMetadata: { resource: "https://concierge.j1.io/mcp" },
 	tokenEndpoint: "/token",
 };
+
 const oauthProvider = new OAuthProvider<DebugEnv>(oauthOptions);
 
 export default {
 	fetch(request: Request, env: DebugEnv, ctx: ExecutionContext) {
 		const url = new URL(request.url);
+
 		if (url.pathname === TWILIO_WEBHOOK_PATH) {
 			return handleTwilioWebhook(request, env, (message) => env.CONCIERGE_MCP.getByName("default").receiveTwilioMessage(message));
 		}
+
 		if (url.pathname === "/debug/mcp") {
 			if (env.CONCIERGE_DEBUG?.trim().toLowerCase() !== "true") {
 				return new Response("Not found", { status: 404 });

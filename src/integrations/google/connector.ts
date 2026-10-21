@@ -17,15 +17,21 @@ const SERVICES = {
 		],
 	},
 } as const;
+
+// SAFETY: SERVICES is a closed, server-owned object; its own enumerable keys are exactly its service names.
+const serviceNames = Object.keys(SERVICES) as Array<keyof typeof SERVICES>;
+
 const requestSchema = apiRequestSchema({
 	methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
 	pathPrefix: SERVICES.gmail.pathPrefix,
 	queryArrays: true,
 }).extend({
-	service: z.enum(Object.keys(SERVICES) as Array<keyof typeof SERVICES>).describe("Enabled Google Workspace API."),
+	service: z.enum(serviceNames).describe("Enabled Google Workspace API."),
 	body: z.unknown().optional().describe("Optional JSON request body. MIME messages use the Gmail API's base64url raw field."),
 });
+
 const requestInputSchema = toToolInputSchema(requestSchema);
+
 type GoogleRequest = z.infer<typeof requestSchema>;
 
 export class GoogleConnector extends ObservedConnector<Env> {
@@ -60,6 +66,7 @@ export class GoogleConnector extends ObservedConnector<Env> {
 	private async request(options: GoogleRequest) {
 		const service = SERVICES[options.service];
 		const url = createApiUrl(service.origin, service.pathPrefix, options.path, options.query);
+
 		return this.requests.request({
 			connector: "Google",
 			operation: options.service,
@@ -80,9 +87,16 @@ function classifyGoogleError(status: number, payload: unknown): ApiFailure {
 	const error = isRecord(payload) && isRecord(payload.error) ? payload.error : {};
 	const reasons = Array.isArray(error.errors) ? error.errors.filter(isRecord).map((entry) => entry.reason) : [];
 	const rateLimited = status === 429 || (status === 403 && reasons.some((reason) => reason === "rateLimitExceeded" || reason === "userRateLimitExceeded"));
-	return {
+
+	const failure: ApiFailure = {
 		message: typeof error.message === "string" ? error.message : undefined,
 		code: typeof reasons[0] === "string" ? reasons[0] : undefined,
-		...(rateLimited ? { category: "rate_limited", retryable: true } as const : {}),
 	};
+
+	if (rateLimited) {
+		failure.category = "rate_limited";
+		failure.retryable = true;
+	}
+
+	return failure;
 }

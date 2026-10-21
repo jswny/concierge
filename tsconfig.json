@@ -39,5 +39,6 @@
 
 		/* Skip type checking all .d.ts files. */
 		"skipLibCheck": true
-	}
+	},
+	"exclude": ["node_modules", "dist", "tools/oxlint/anti-slop"]
 }

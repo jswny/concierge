@@ -4,15 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "npm run type-check && npm test && vite build && npm run test:build",
+    "build": "npm run lint && npm run test:lint && npm run type-check && npm test && vite build && npm run test:build",
     "deploy": "npm run build && wrangler deploy --config dist/concierge/wrangler.json",
     "dev": "vite",
     "start": "npm run dev",
     "preview": "vite preview",
     "test": "node --test tests/worker.test.mjs tests/events.test.mjs",
     "test:build": "node --test tests/build.test.mjs",
+    "test:lint": "node --test tools/oxlint/anti-slop/rules/*.test.ts",
     "cf-typegen": "wrangler types --config wrangler.jsonc",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "lint": "oxlint --deny-warnings src tests vite.config.ts oxlint.config.ts"
   },
   "dependencies": {
     "@cloudflare/codemode": "0.5.3",
@@ -29,7 +31,9 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.63.1",
+    "@oxlint/plugins": "1.89.0",
     "@types/node": "^26.1.1",
+    "oxlint": "1.89.0",
     "typescript": "7.0.2",
     "vite": "8.3.4",
     "wrangler": "4.149.0"

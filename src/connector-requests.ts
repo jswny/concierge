@@ -4,6 +4,7 @@ import {
 } from "./response-formats";
 
 export type QueryValue = boolean | number | string | Array<boolean | number | string>;
+
 type ErrorCategory =
 	| "authentication"
 	| "permission"
@@ -16,7 +17,9 @@ type ErrorCategory =
 	| "unsupported_response"
 	| "response_too_large"
 	| "busy";
+
 type Outcome = "not_started" | "rejected" | "unknown" | "succeeded";
+
 type FailureDetails = {
 	category: ErrorCategory;
 	message: string;
@@ -44,12 +47,14 @@ type Operation = {
 	safeToReplay?: boolean;
 	timeoutMs?: number;
 };
+
 export type Attempt = {
 	signal: AbortSignal;
 	remainingMs(): number;
 	dispatch(): void;
 	succeeded(): void;
 };
+
 export type ApiFailure = {
 	category?: ErrorCategory;
 	message?: string;
@@ -59,7 +64,9 @@ export type ApiFailure = {
 	safeToReplay?: boolean;
 	outcome?: Outcome;
 };
+
 type ResponseOptions = Pick<HttpRequest, "format" | "sensitive" | "sensitiveValues" | "classifyError">;
+
 type HttpRequest = Operation & {
 	url: URL;
 	method?: string;
@@ -71,6 +78,7 @@ type HttpRequest = Operation & {
 	classifyError?: (status: number, payload: unknown) => ApiFailure;
 	onResponse?: (response: Response, headers: Headers) => void;
 };
+
 type Limits = {
 	timeoutMs: number;
 	maxRetries: number;
@@ -79,6 +87,7 @@ type Limits = {
 	maxResponseBytes: number;
 	backoffMs: number;
 };
+
 const DEFAULTS: Limits = {
 	timeoutMs: 30_000,
 	maxRetries: 2,
@@ -109,15 +118,20 @@ export class ConnectorRequests {
 		let release: (() => void) | undefined;
 		let pending: Promise<T> | undefined;
 		let failure: ConnectorError | undefined;
+
 		try {
 			let gate = this.gates.get(operation.connector);
+
 			if (!gate) {
 				gate = new Gate(this.limits.concurrency, this.limits.maxQueued);
 				this.gates.set(operation.connector, gate);
 			}
+
 			release = await gate.acquire(controller.signal);
+
 			for (;;) {
 				let cooldown;
+
 				while ((cooldown = (this.cooldowns.get(operation.connector) ?? 0) - Date.now()) > 0) {
 					if (cooldown >= deadline - Date.now())
 						throw new ConnectorError({
@@ -129,9 +143,11 @@ export class ConnectorRequests {
 						});
 					await wait(cooldown, controller.signal);
 				}
+
 				controller.signal.throwIfAborted();
 				attempts++;
 				outcome = "not_started";
+
 				try {
 					pending = execute({
 						signal: controller.signal,
@@ -145,18 +161,23 @@ export class ConnectorRequests {
 					});
 					const result = await abortable(pending, controller.signal);
 					failure = undefined;
+
 					return result;
 				} catch (error) {
 					failure = normalizeError(error, controller.signal);
+
 					if (outcome !== "not_started") outcome = failure.details.outcome ?? outcome;
+
 					if (!operation.readOnly && outcome === "unknown") uncertainWrite = true;
 					const retryAfterMs = failure.details.retryAfterMs;
+
 					if (failure.details.category === "rate_limited" && retryAfterMs !== undefined) {
 						this.cooldowns.set(
 							operation.connector,
 							Math.max(this.cooldowns.get(operation.connector) ?? 0, Date.now() + retryAfterMs),
 						);
 					}
+
 					if (
 						controller.signal.aborted ||
 						failure.details.retryHandled ||
@@ -165,16 +186,19 @@ export class ConnectorRequests {
 						(!operation.readOnly && !operation.safeToReplay && !failure.details.safeToReplay)
 					)
 						throw failure;
+
 					const delay = Math.max(
 						retryAfterMs ?? 0,
 						this.limits.backoffMs * 2 ** (attempts - 1) * (0.5 + Math.random()),
 					);
+
 					if (delay >= deadline - Date.now()) throw failure;
 					await wait(delay, controller.signal);
 				}
 			}
 		} catch (error) {
 			failure = normalizeError(error, controller.signal);
+
 			if (!operation.readOnly && uncertainWrite && outcome !== "succeeded") outcome = "unknown";
 			const details = { ...failure.details, outcome, retryHandled: true };
 			const context = [details.category, `attempts=${attempts}`];
@@ -182,16 +206,21 @@ export class ConnectorRequests {
 				`retryable=${!!details.retryable}`,
 				`safe_to_replay=${operation.readOnly || !!operation.safeToReplay || !!details.safeToReplay || outcome === "not_started"}`,
 			);
+
 			if (details.code) context.push(`code=${details.code}`);
+
 			if (details.requestId) context.push(`request_id=${details.requestId}`);
+
 			if (!operation.readOnly) context.push(`outcome=${details.outcome}`);
 			const message = `${operation.connector} ${operation.operation}: ${details.message}${details.retryAfterMs !== undefined ? ` Retry-After: ${Math.ceil(details.retryAfterMs / 1000)}s.` : ""} [${context.join("; ")}]${!operation.readOnly && details.outcome === "unknown" ? " Write outcome is unknown; verify external state before retrying." : ""}`;
 			throw new ConnectorError({ ...details, message });
 		} finally {
 			clearTimeout(timer);
+
 			// A binding may not support cancellation. Keep its permit until it actually settles.
 			if (controller.signal.aborted && pending) void pending.then(release, release);
 			else release?.();
+
 			try {
 				console.log(
 					JSON.stringify({
@@ -214,12 +243,15 @@ export class ConnectorRequests {
 			const headers = new Headers(
 				typeof options.headers === "function" ? await options.headers() : options.headers,
 			);
+
 			const body = typeof options.body === "function" ? await options.body() : options.body;
 			headers.set("Accept", responseAccept(options.format));
+
 			if (options.body !== undefined && !headers.has("Content-Type"))
 				headers.set("Content-Type", RESPONSE_TYPES.json.mimeType);
 			attempt.signal.throwIfAborted();
 			attempt.dispatch();
+
 			const response = await fetch(options.url, {
 				method: options.method ?? "GET",
 				headers,
@@ -227,7 +259,9 @@ export class ConnectorRequests {
 				redirect: "manual",
 				signal: attempt.signal,
 			});
+
 			options.onResponse?.(response, headers);
+
 			return this.responsePayload(response, attempt, options, headers);
 		});
 	}
@@ -239,11 +273,14 @@ export class ConnectorRequests {
 		headers = new Headers(),
 	): Promise<unknown> {
 		if (response.ok) attempt.succeeded();
+
 		if (response.status === 401 || (!response.ok && options.sensitive)) {
 			await response.body?.cancel();
 			throw this.httpError(response, undefined, options, headers);
 		}
+
 		let payload: unknown;
+
 		try {
 			payload = await this.readPayload(
 				response,
@@ -256,7 +293,9 @@ export class ConnectorRequests {
 			// Non-JSON or oversized error bodies must not obscure the HTTP failure.
 			payload = undefined;
 		}
+
 		if (!response.ok) throw this.httpError(response, payload, options, headers);
+
 		return payload;
 	}
 
@@ -274,16 +313,20 @@ export class ConnectorRequests {
 		const reader = response.body.getReader();
 		const chunks: Uint8Array[] = [];
 		let size = 0;
+
 		try {
 			for (;;) {
 				const { value, done } = await abortable(reader.read(), signal);
+
 				if (done) break;
+
 				// Wait for actual bytes so empty successes still return null, regardless of headers.
 				if (value.byteLength && unsupported) throw new ConnectorError({
 					category: "unsupported_response",
 					message: `Upstream returned an unsupported response format${mediaType ? ` (${mediaType})` : ""}; this connector accepts ${supportedResponseTypes(format)}.`,
 				});
 				size += value.byteLength;
+
 				if (size > maxBytes)
 					throw new ConnectorError({
 						category: "response_too_large",
@@ -297,23 +340,32 @@ export class ConnectorRequests {
 		} finally {
 			reader.releaseLock();
 		}
+
 		const bytes = new Uint8Array(size);
 		let offset = 0;
+
 		for (const chunk of chunks) {
 			bytes.set(chunk, offset);
 			offset += chunk.byteLength;
 		}
+
 		if (responseType?.kind === "image") {
 			if (!responseType.validate(bytes)) throw new ConnectorError({
 				category: "invalid_response",
 				message: `Upstream returned invalid ${responseType.label}.`,
 			});
+
 			return { type: "image", mimeType: responseType.mimeType, data: bytes } satisfies ConnectorImage;
 		}
+
 		const text = new TextDecoder().decode(bytes);
+
 		if (!text) return null;
+
 		try {
-			return JSON.parse(text) as unknown;
+			const payload: unknown = JSON.parse(text);
+
+			return payload;
 		} catch {
 			if (format === "json-or-text") return text;
 			throw new ConnectorError({
@@ -330,8 +382,10 @@ export class ConnectorRequests {
 		headers = new Headers(),
 	): ConnectorError {
 		const status = response.status;
+
 		const custom =
 			options.sensitive || status === 401 ? {} : (options.classifyError?.(status, payload) ?? {});
+
 		const category =
 			custom.category ??
 			(status === 401
@@ -341,16 +395,19 @@ export class ConnectorRequests {
 					: status === 429
 						? "rate_limited"
 						: "http");
+
 		const secrets = [
 			...(options.sensitiveValues ?? []),
 			headers.get("Authorization")?.replace(/^\S+\s+/, ""),
 			headers.get("X-API-Key"),
 			headers.get("X-Goog-Api-Key"),
 		].filter((value): value is string => !!value);
+
 		const message =
 			category === "authentication" || category === "permission" || options.sensitive
 				? ""
 				: sanitize(custom.message, secrets);
+
 		return new ConnectorError({
 			category,
 			message: `API returned HTTP ${status}.${message ? ` ${message}` : ""}`,
@@ -381,6 +438,7 @@ class Gate {
 	) {}
 	acquire(signal: AbortSignal): Promise<() => void> {
 		signal.throwIfAborted();
+
 		return new Promise((resolve, reject) => {
 			const entry = {
 				enter: () => {
@@ -397,11 +455,14 @@ class Gate {
 				},
 				reject,
 			};
+
 			const cancel = () => {
 				const index = this.queued.indexOf(entry);
+
 				if (index !== -1) this.queued.splice(index, 1);
 				reject(signal.reason);
 			};
+
 			if (this.active < this.capacity) entry.enter();
 			else if (this.queued.length >= this.maxQueued)
 				reject(
@@ -426,6 +487,7 @@ export function createApiUrl(
 	query: Record<string, QueryValue> = {},
 ): URL {
 	const url = new URL(path, origin);
+
 	if (
 		!path.startsWith(prefix) ||
 		url.origin !== origin ||
@@ -439,21 +501,25 @@ export function createApiUrl(
 		throw new Error(
 			`API paths must stay under ${origin}${prefix} and put query parameters in query.`,
 		);
+
 	for (const [key, value] of Object.entries(query)) {
 		if (["access_token", "oauth_token", "key", "token", "api_key"].includes(key.toLowerCase()))
 			throw new Error("API credentials are managed server-side.");
+
 		for (const item of Array.isArray(value) ? value : [value]) {
 			if (!isScalar(item))
 				throw new Error("Expected scalar query parameters or arrays of scalar values.");
 			url.searchParams.append(key, String(item));
 		}
 	}
+
 	return url;
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
 }
+
 export function isScalar(value: unknown): value is boolean | number | string {
 	return (
 		typeof value === "boolean" ||
@@ -461,23 +527,32 @@ export function isScalar(value: unknown): value is boolean | number | string {
 		(typeof value === "number" && Number.isFinite(value))
 	);
 }
+
 export function parseRetryAfter(value: string | null, now = Date.now()): number | undefined {
 	if (!value?.trim()) return undefined;
+
 	if (/^\d+(?:\.\d+)?$/.test(value.trim())) {
 		const ms = Number(value) * 1000;
+
 		return Number.isFinite(ms) ? ms : undefined;
 	}
+
 	if (!/^[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(value.trim()))
 		return undefined;
 	const timestamp = Date.parse(value);
+
 	return Number.isFinite(timestamp) ? Math.max(0, timestamp - now) : undefined;
 }
+
 function sanitize(value: unknown, secrets: string[]): string | undefined {
 	if (typeof value !== "string") return undefined;
 	let text = value;
+
 	for (const secret of secrets) text = text.replaceAll(secret, "[redacted]");
+
 	return text.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 1000) || undefined;
 }
+
 function normalizeError(error: unknown, signal: AbortSignal): ConnectorError {
 	if (signal.aborted)
 		return new ConnectorError({
@@ -485,32 +560,40 @@ function normalizeError(error: unknown, signal: AbortSignal): ConnectorError {
 			message: "Operation deadline exceeded.",
 			retryable: true,
 		});
+
 	if (error instanceof ConnectorError) return error;
+
 	return new ConnectorError({
 		category: "network",
 		message: "Upstream request failed.",
 		retryable: true,
 	});
 }
+
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 	if (signal.aborted) return Promise.reject(signal.reason);
+
 	return new Promise((resolve, reject) => {
 		const cancel = () => reject(signal.reason);
 		signal.addEventListener("abort", cancel, { once: true });
 		promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", cancel));
 	});
 }
+
 function wait(ms: number, signal: AbortSignal): Promise<void> {
 	return new Promise((resolve, reject) => {
 		signal.throwIfAborted();
+
 		const timer = setTimeout(() => {
 			signal.removeEventListener("abort", cancel);
 			resolve();
 		}, ms);
+
 		const cancel = () => {
 			clearTimeout(timer);
 			reject(signal.reason);
 		};
+
 		signal.addEventListener("abort", cancel, { once: true });
 	});
 }

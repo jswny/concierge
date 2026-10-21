@@ -8,12 +8,14 @@ import { apiRequestSchema, parseApiRequest, toToolInputSchema } from "../../conn
 const PLACES_ORIGIN = "https://places.googleapis.com";
 const ROUTES_ORIGIN = "https://routes.googleapis.com";
 const ROUTE_PATHS = new Set(["/directions/v2:computeRoutes", "/distanceMatrix/v2:computeRouteMatrix"]);
+
 const READ_ONLY_POST_PATHS = new Set([
 	"/v1/places:searchText",
 	"/v1/places:searchNearby",
 	"/v1/places:autocomplete",
 	...ROUTE_PATHS,
 ]);
+
 const requestSchema = apiRequestSchema({ methods: ["GET", "POST"], pathPrefix: "/" }).extend({
 	service: z.enum(["places", "routes"]).describe("Places API (New) for public place data; Routes API for directions, travel time, distance, and matrices."),
 	path: z.string().startsWith("/").describe("Places: /v1/ paths. Routes: POST /directions/v2:computeRoutes or /distanceMatrix/v2:computeRouteMatrix."),
@@ -22,9 +24,11 @@ const requestSchema = apiRequestSchema({ methods: ["GET", "POST"], pathPrefix: "
 		if (!options.path.startsWith("/v1/")) ctx.addIssue({ code: "custom", path: ["path"], message: "Places paths must begin with /v1/." });
 	} else {
 		if (options.method !== "POST") ctx.addIssue({ code: "custom", path: ["method"], message: "Routes endpoints require POST." });
+
 		if (!ROUTE_PATHS.has(options.path)) ctx.addIssue({ code: "custom", path: ["path"], message: "Expected /directions/v2:computeRoutes or /distanceMatrix/v2:computeRouteMatrix." });
 	}
 });
+
 const requestInputSchema = toToolInputSchema(requestSchema);
 
 export class MapsConnector extends ObservedConnector<Env> {
@@ -55,10 +59,13 @@ export class MapsConnector extends ObservedConnector<Env> {
 				inputSchema: requestInputSchema,
 				execute: async (args) => {
 					const options = parseApiRequest(requestSchema, args);
+
 					if (!this.env.GOOGLE_MAPS_API_KEY) throw new Error("GOOGLE_MAPS_API_KEY is not configured.");
+
 					const url = options.service === "places"
 						? createApiUrl(PLACES_ORIGIN, "/v1/", options.path, options.query)
 						: createApiUrl(ROUTES_ORIGIN, "/", options.path, options.query);
+
 					return this.requests.request({
 						connector: "Maps",
 						operation: options.service,
@@ -77,6 +84,7 @@ export class MapsConnector extends ObservedConnector<Env> {
 
 function classifyMapsError(_status: number, payload: unknown): ApiFailure {
 	const error = isRecord(payload) && isRecord(payload.error) ? payload.error : {};
+
 	return {
 		message: typeof error.message === "string" ? error.message : undefined,
 		code: typeof error.status === "string" ? error.status : undefined,

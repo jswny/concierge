@@ -6,12 +6,15 @@ function escapeHtml(value: string) {
 
 export function renderConsentPage(details: ConsentDescription, handle: string) {
 	const clientName = escapeHtml(details.clientName);
+
 	const publisher = details.clientDomain
 		? `<p>Published by <strong>${escapeHtml(details.clientDomain)}</strong></p>`
 		: "";
+
 	const scopes = details.scope.length
 		? `<dt>Permissions</dt><dd>${details.scope.map(escapeHtml).join(", ")}</dd>`
 		: "<dt>Permissions</dt><dd>Access to Concierge tools</dd>";
+
 	return `<!doctype html>
 <html lang="en">
 <head>

@@ -48,6 +48,7 @@ const TEST_SECRETS = {
 	TWILIO_WEBHOOK_KEY_ID: `webhooks_sharedkey_${"a".repeat(26)}`,
 	TWILIO_WEBHOOK_KEY_SECRET: "test-twilio-webhook-secret",
 	EXA_API_KEY: "test-exa-api-key",
+	FANTASYPROS_API_KEY: "test-fantasypros-api-key",
 	KALSHI_API_KEY_ID: "test-kalshi-key-id",
 	KALSHI_PRIVATE_KEY: KALSHI_KEYS.privateKey.export({ type: "pkcs8", format: "pem" }),
 };
@@ -845,7 +846,7 @@ test("serves the code tool over the modern MCP protocol", async () => {
 			const connectorSection = (tool.description ?? "").split("## Available connectors\n")[1]?.split("\n## ")[0];
 			assert.ok(connectorSection);
 
-			for (const name of ["cloudflare", "google", "maps", "unifi", "twilio", "exa", "kalshi"]) {
+			for (const name of ["cloudflare", "google", "maps", "unifi", "twilio", "exa", "kalshi", "fantasypros"]) {
 				assert.match(connectorSection, new RegExp("- `" + name + "`"));
 			}
 
@@ -1463,6 +1464,157 @@ test("rejects invalid Google request arguments before outbound calls", async () 
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
+});
+
+test("FantasyPros discovers data capabilities and preserves native paths, filters and JSON", async () => {
+	const originalFetch = globalThis.fetch;
+
+	const cases = [
+		{ path: "/public/v2/json/nfl/2026/consensus-rankings", query: { position: "RB", scoring: "PPR", week: 7 }, payload: { season: "2026", week: "7", players: [{ player_id: 9001, player_name: "Fixture player", rank_ecr: 1, tier: 1 }], last_updated: "2026-10-22", warnings: ["sample data"] } },
+		{ path: "/public/v2/json/nfl/players", query: { player: 9001, external_ids: "yahoo:espn" }, payload: { players: [{ player_id: 9001, external_ids: { yahoo: "123" } }] } },
+		{ path: "/public/v2/json/nfl/news", query: { player: 9001, limit: 1 }, payload: { news: [{ title: "Fixture news", impact: "Untrusted source text" }], next: "native+cursor" } },
+		{ path: "/public/v2/json/nba/2026/projections", query: { position: "PG" }, payload: { players: [{ player_id: 123, stats: { points: 23.4 } }] } },
+		{ path: "/public/v2/json/mlb/lineups", query: { date: "2026-10-22" }, payload: { games: [], status: "scheduled" } },
+		{ path: "/public/v2/json/nhl/injuries", query: { player: [123, 456] }, payload: { players: [], future: { native: true } } },
+	];
+
+	let current;
+	let calls = 0;
+	let dispatchFailure;
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		const url = new URL(request.url);
+
+		if (url.hostname !== "api.fantasypros.com") return originalFetch(input, init);
+		calls++;
+
+		try {
+			assert.equal(request.method, "GET");
+			assert.equal(url.pathname, current.path);
+			assert.equal(request.headers.get("x-api-key"), TEST_SECRETS.FANTASYPROS_API_KEY);
+			assert.equal(request.headers.get("Accept"), "application/json");
+			assert.equal(request.headers.has("Authorization"), false);
+			assert.equal(await request.text(), "");
+
+			for (const [key, value] of Object.entries(current.query)) {
+				assert.deepEqual(url.searchParams.getAll(key), (Array.isArray(value) ? value : [value]).map(String));
+			}
+		} catch (error) { dispatchFailure = error; throw error; }
+
+		return Response.json(current.payload);
+	};
+
+	try {
+		await withMcpClient(undefined, async (client) => {
+			for (const query of ["fantasypros", "fantasy rankings", "player projections", "ADP", "fantasy injuries"]) {
+				const discovery = await client.callTool({ name: "code", arguments: { code: `async () => await codemode.search(${JSON.stringify(query)})` } });
+				assert.ok(discovery.structuredContent.result.results.some((match) => match.path === "fantasypros.request"), query);
+			}
+
+			const docs = await client.callTool({ name: "code", arguments: { code: "async () => await codemode.describe('fantasypros.request')" } });
+			assert.match(JSON.stringify(docs), /sample or limited data/);
+
+			for (current of cases) {
+				const { payload, ...options } = current;
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await fantasypros.request(${JSON.stringify({ method: "GET", ...options })})` } });
+
+				if (dispatchFailure) throw dispatchFailure;
+				assert.equal(result.isError, undefined, JSON.stringify(result));
+				assert.deepEqual(result.structuredContent.result, payload);
+				assert.deepEqual(JSON.parse(result.content[0].text), payload);
+				assert.doesNotMatch(JSON.stringify(result), /test-fantasypros-api-key/);
+			}
+		});
+		assert.equal(calls, cases.length);
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("FantasyPros rejects credential overrides, unsupported methods and unsafe paths before dispatch", async () => {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		if (new URL(new Request(input, init).url).hostname !== "api.fantasypros.com") return originalFetch(input, init);
+		calls++;
+
+		return Response.json({ unexpected: true });
+	};
+
+	try {
+		await withMcpClient(undefined, async (client) => {
+			for (const overrides of [
+				{ method: "POST" }, { method: "DELETE" }, { body: {} }, { apiKey: "override" }, { headers: { "x-api-key": "override" } },
+				{ path: "https://evil.example/public/v2/json/nfl/players" }, { path: "/v2/json/nfl/players" }, { path: "/mcp" },
+				{ path: "/public/v2/json/../keys" }, { path: "/public/v2/json/nfl/%2e%2e/keys" }, { path: "/public/v2/json/nfl/%252e%252e/keys" },
+				{ path: "/public/v2/json//players" }, { path: "/public/v2/json/nfl/players?key=override" }, { path: "/public/v2/json/nfl/players#fragment" },
+				{ query: { api_key: "override" } }, { query: { "X-API-Key": "override" } }, { query: { invalid: {} } },
+			]) {
+				const options = { method: "GET", path: "/public/v2/json/nfl/players", ...overrides };
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await fantasypros.request(${JSON.stringify(options)})` } });
+				assert.equal(result.isError, true, JSON.stringify(options));
+			}
+		});
+		assert.equal(calls, 0);
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("FantasyPros uses bounded read retries and sanitizes native API and response-format errors", async () => {
+	const originalFetch = globalThis.fetch;
+	let mode;
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		const url = new URL(new Request(input, init).url);
+
+		if (!["api.fantasypros.com", "evil.example"].includes(url.hostname)) return originalFetch(input, init);
+		assert.equal(url.hostname, "api.fantasypros.com");
+		calls++;
+
+		if (mode === "recover") return calls === 1 ? Response.json({ message: "Busy" }, { status: 429, headers: { "Retry-After": "0" } }) : Response.json({ players: [] });
+
+		if (mode === "redirect") return new Response(null, { status: 302, headers: { Location: "https://evil.example/credentials" } });
+
+		if (mode === "invalid" || mode === "binary") return new Response("private-response-body", { headers: { "Content-Type": mode === "invalid" ? "application/json" : "image/jpeg" } });
+
+		return Response.json({ message: `Invalid Position ${TEST_SECRETS.FANTASYPROS_API_KEY}`, parameter: "position" }, { status: mode, headers: { "Retry-After": "0" } });
+	};
+
+	try {
+		await withMcpClient(undefined, async (client) => {
+			for (mode of ["recover", 400, 401, 403, 429, 503, "redirect", "invalid", "binary"]) {
+				calls = 0;
+				const result = await client.callTool({ name: "code", arguments: { code: "async () => await fantasypros.request({ method: 'GET', path: '/public/v2/json/nfl/2026/consensus-rankings', query: { position: 'RB' } })" } });
+				assert.equal(result.isError, mode === "recover" ? undefined : true, JSON.stringify(result));
+				assert.equal(calls, mode === "recover" ? 2 : [429, 503].includes(mode) ? 3 : 1, String(mode));
+
+				if (mode === 400) assert.match(result.content[0].text, /Invalid Position/);
+
+				if (mode === 401) assert.doesNotMatch(result.content[0].text, /Invalid Position/);
+				assert.doesNotMatch(JSON.stringify(result), /test-fantasypros-api-key|private-response-body/);
+			}
+		});
+		assert.doesNotMatch(JSON.stringify(debugServer.getLogs()), /test-fantasypros-api-key|private-response-body/);
+	} finally { globalThis.fetch = originalFetch; }
+});
+
+test("FantasyPros fails before dispatch when its API key is missing", async () => {
+	const harness = createConciergeHarness(true, { FANTASYPROS_API_KEY: "" });
+	const client = new Client({ name: "fantasypros-config-test", version: "1" });
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	globalThis.fetch = async (input, init) => {
+		if (new URL(new Request(input, init).url).hostname !== "api.fantasypros.com") return originalFetch(input, init);
+		calls++;
+
+		return Response.json({ unexpected: true });
+	};
+
+	try {
+		const listener = await harness.listen();
+		await client.connect(new StreamableHTTPClientTransport(new URL("/debug/mcp", listener.url)));
+		const result = await client.callTool({ name: "code", arguments: { code: "async () => await fantasypros.request({ method: 'GET', path: '/public/v2/json/nfl/players' })" } });
+		assert.equal(result.isError, true);
+		assert.match(result.content[0].text, /FANTASYPROS_API_KEY is not configured/);
+		assert.equal(calls, 0);
+	} finally { globalThis.fetch = originalFetch; await client.close(); await harness.close(); }
 });
 
 test("discovers Exa and preserves native search, contents, answers and resource requests", async () => {

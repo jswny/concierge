@@ -5,10 +5,11 @@ import { unifiConnector } from "./integrations/unifi/connector";
 import { twilioConnector } from "./integrations/twilio/connector";
 import { exaConnector } from "./integrations/exa/connector";
 import { kalshiConnector } from "./integrations/kalshi/connector";
+import { fantasyprosConnector } from "./integrations/fantasypros/connector";
 import type { ConnectorDependencies } from "./connector-definition";
 
 export const CONNECTOR_DEFINITIONS = [
-	cloudflareConnector, googleConnector, mapsConnector, unifiConnector, twilioConnector, exaConnector, kalshiConnector,
+	cloudflareConnector, googleConnector, mapsConnector, unifiConnector, twilioConnector, exaConnector, kalshiConnector, fantasyprosConnector,
 ] as const;
 
 export type ConnectorId = typeof CONNECTOR_DEFINITIONS[number]["id"];

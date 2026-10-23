@@ -138,6 +138,8 @@ Concierge provides personal agents, such as ChatGPT and Codex, with pre-authenti
 - Do not rely on Code Mode rollback/revert for MCP-visible behavior; this server does not expose rollback controls, and arbitrary side-effect tools should be designed as explicit safe operations instead.
 - Do not advertise `codemode.step` in the model-facing tool description while replay/resume-oriented workflows remain unsupported.
 
+- FantasyPros lives in `src/integrations/fantasypros/` and exposes `fantasypros.request({ method, path, query? })` against `https://api.fantasypros.com/public/v2/json/` using the `FANTASYPROS_API_KEY` Worker secret in `x-api-key`. All currently documented operations are GET reads; preserve native paths, sport/season filters, JSON, IDs, scoring formats, timestamps, warnings and pagination. Use the shared bounded read retries and JSON response handling. Data availability and quotas depend on the key's plan; free keys can return sample or limited data. Preserve attribution and do not infer completeness or freshness from success. No personal league/roster access, premium advice tools, separate FantasyPros MCP proxy, scraping, streaming, alternate origin or binary responses are implemented.
+
 ## Local Development
 
 - Use the stable Cloudflare Vite plugin for development and bundling; retain `wrangler.jsonc` as the input configuration and Wrangler for types, integration tests, and deployment. Do not adopt the `cf` CLI or `cloudflare.config.ts` for this project.

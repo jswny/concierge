@@ -10,7 +10,7 @@ type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B 
 
 type Assert<T extends true> = T;
 
-export type ConnectorIdsAreLiteral = Assert<Equal<ConnectorId, "cloudflare" | "google" | "maps" | "unifi" | "twilio" | "exa" | "kalshi">>;
+export type ConnectorIdsAreLiteral = Assert<Equal<ConnectorId, "cloudflare" | "google" | "maps" | "unifi" | "twilio" | "exa" | "kalshi" | "fantasypros">>;
 
 // @ts-expect-error Authentication must explicitly supply its sensitive values, even if empty.
 const incompleteAuthentication: RequestAuthentication = { headers: { Authorization: "Bearer test" } };

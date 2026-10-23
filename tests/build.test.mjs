@@ -98,6 +98,15 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 			return Response.json({ requestId: "exa-build", results: [{ url: "https://example.com", title: "Example" }] });
 		}
 
+		if (url.hostname === "api.fantasypros.com") {
+			assert.equal(request.headers.get("x-api-key"), "unused-build-test-secret");
+			assert.equal(request.method, "GET");
+			assert.equal(url.pathname, "/public/v2/json/nfl/2026/consensus-rankings");
+			assert.equal(url.searchParams.get("position"), "RB");
+
+			return Response.json({ players: [{ player_id: 9001, rank_ecr: 1 }], scoring: "PPR" });
+		}
+
 		if (url.hostname !== "api.ui.com") return originalFetch(input, init);
 
 		return new Response(Buffer.from(JPEG_BASE64, "base64"), { headers: { "Content-Type": "image/jpeg" } });
@@ -146,6 +155,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		assert.match(tools[0].description, /- `twilio`.*twilio\.request/);
 		assert.match(tools[0].description, /- `exa`.*exa\.request/);
 		assert.match(tools[0].description, /- `kalshi`.*kalshi\.request/);
+		assert.match(tools[0].description, /- `fantasypros`.*fantasypros\.request/);
 		assert.doesNotMatch(tools[0].description, /notion/i);
 		assert.match(tools[0].description, /search for `maps directions`/);
 
@@ -155,7 +165,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 
 		assert.equal(result.isError, undefined);
 		assert.equal(result.structuredContent.result.sum, 4);
-		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["cloudflare.read_webpage_as_markdown", "exa.request", "google.request", "kalshi.request", "maps.request", "twilio.request", "unifi.request"]);
+		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["cloudflare.read_webpage_as_markdown", "exa.request", "fantasypros.request", "google.request", "kalshi.request", "maps.request", "twilio.request", "unifi.request"]);
 
 		const page = await client.callTool({ name: "code", arguments: {
 			code: "async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/test' })",
@@ -197,6 +207,13 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 
 		assert.equal(balance.isError, undefined, JSON.stringify(balance));
 		assert.deepEqual(balance.structuredContent.result, { balance: 12345, portfolio_value: 5678, updated_ts: 1234567890 });
+
+		const rankings = await client.callTool({ name: "code", arguments: {
+			code: "async () => await fantasypros.request({ method: 'GET', path: '/public/v2/json/nfl/2026/consensus-rankings', query: { position: 'RB', scoring: 'PPR' } })",
+		} });
+
+		assert.equal(rankings.isError, undefined, JSON.stringify(rankings));
+		assert.deepEqual(rankings.structuredContent.result, { players: [{ player_id: 9001, rank_ecr: 1 }], scoring: "PPR" });
 	} finally {
 		globalThis.fetch = originalFetch;
 		await client.close();

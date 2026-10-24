@@ -851,6 +851,7 @@ test("serves the code tool over the modern MCP protocol", async () => {
 			}
 
 			assert.match(connectorSection, /Routes API/);
+			assert.match(connectorSection, /Google Calendar.*availability/);
 			assert.match(connectorSection, /JPEG camera snapshots/);
 			assert.doesNotMatch(tool.description ?? "", /notion/i);
 			assert.match(tool.description ?? "", /Search first for the task capability/);
@@ -878,6 +879,13 @@ test("serves the code tool over the modern MCP protocol", async () => {
 
 			assert.equal(discovery.isError, undefined);
 			assert.equal(discovery.structuredContent.result.results[0].path, "google.request");
+
+			const calendarDiscovery = await client.callTool({ name: "code", arguments: {
+				code: 'async () => await codemode.search("calendar events availability")',
+			} });
+
+			assert.equal(calendarDiscovery.isError, undefined);
+			assert.equal(calendarDiscovery.structuredContent.result.results[0].path, "google.request");
 
 			for (const query of ["maps directions", "google maps", "route distance", "business ratings"]) {
 				const matches = await client.callTool({ name: "code", arguments: { code: `async () => await codemode.search(${JSON.stringify(query)})` } });
@@ -1401,6 +1409,7 @@ test("exposes generated connector contracts and validates browser inputs", async
 		assert.equal(docs.isError, undefined);
 		assert.match(JSON.stringify(docs.structuredContent.result.google), /GET.*POST.*PATCH.*DELETE/s);
 		assert.match(JSON.stringify(docs.structuredContent.result.google), /gmail/);
+		assert.match(JSON.stringify(docs.structuredContent.result.google), /calendar/);
 		assert.match(JSON.stringify(docs.structuredContent.result.browser), /url/);
 
 		for (const args of [null, {}, { url: "" }, { url: "not-a-url" }, { url: "ftp://example.com" }, { url: "https://user:password@example.com" }, { url: "https://example.com", extra: true }, ...[
@@ -3139,6 +3148,170 @@ test("calls Google Workspace through signed JWTs, fixed delegation, and a privat
 		});
 	} finally {
 		globalThis.fetch = originalFetch;
+	}
+});
+
+test("supports Calendar with isolated delegated scopes, native requests and safe read retries", async (t) => {
+	const harness = createConciergeHarness(true);
+	const originalFetch = globalThis.fetch;
+	const exchanges = [];
+	const requests = [];
+	let apiStatus = 200;
+	let failuresRemaining = 0;
+	let rejectCalendarAuth = false;
+	let payload = { kind: "calendar#calendarList", items: [{ id: "joe@j1.io", primary: true, accessRole: "owner" }], nextPageToken: "native+cursor" };
+
+	globalThis.fetch = async (input, init) => {
+		const request = new Request(input, init);
+		const url = new URL(request.url);
+
+		if (url.hostname === "oauth2.googleapis.com") {
+			const form = new URLSearchParams(await request.text());
+			assert.equal(form.get("grant_type"), "urn:ietf:params:oauth:grant-type:jwt-bearer");
+			const [header, claims, signature] = form.get("assertion").split(".");
+			assert.ok(verify("RSA-SHA256", Buffer.from(`${header}.${claims}`), GOOGLE_KEYS.publicKey, Buffer.from(signature, "base64url")));
+			const jwt = JSON.parse(Buffer.from(claims, "base64url"));
+			assert.equal(jwt.sub, "joe@j1.io");
+			assert.equal(jwt.iss, "concierge@j1-concierge.iam.gserviceaccount.com");
+			assert.equal(jwt.aud, "https://oauth2.googleapis.com/token");
+			const service = jwt.scope === "https://www.googleapis.com/auth/calendar" ? "calendar" : "gmail";
+
+			if (service === "gmail") assert.deepEqual(jwt.scope.split(" ").sort(), [
+				"https://mail.google.com/", "https://www.googleapis.com/auth/gmail.settings.basic", "https://www.googleapis.com/auth/gmail.settings.sharing",
+			].sort());
+
+			exchanges.push(service);
+
+			if (service === "calendar" && rejectCalendarAuth) {
+				return Response.json({ error: "unauthorized_client", error_description: "private delegation failure" }, { status: 400 });
+			}
+
+			return Response.json({ access_token: `test-${service}-isolated-token`, expires_in: 3600 });
+		}
+
+		if (!["www.googleapis.com", "gmail.googleapis.com"].includes(url.hostname)) return originalFetch(input, init);
+
+		const service = url.hostname === "www.googleapis.com" ? "calendar" : "gmail";
+		assert.equal(request.headers.get("Authorization"), `Bearer test-${service}-isolated-token`);
+		requests.push(request.clone());
+
+		if (service === "gmail") return Response.json({ emailAddress: "joe@j1.io" });
+
+		if (failuresRemaining > 0) {
+			failuresRemaining--;
+
+			return Response.json({ error: { message: "Calendar rate limit", errors: [{ reason: "userRateLimitExceeded" }] } }, { status: 403, headers: { "Retry-After": "0" } });
+		}
+
+		if (apiStatus === 204) return new Response(null, { status: 204 });
+
+		if (apiStatus === 401) return Response.json({ error: { message: "Rejected test-calendar-isolated-token" } }, { status: 401 });
+
+		return Response.json(payload);
+	};
+
+	const calendarList = { service: "calendar", method: "GET", path: "/calendar/v3/users/me/calendarList" };
+	const gmailProfile = { service: "gmail", method: "GET", path: "/gmail/v1/users/me/profile" };
+	const invoke = (client, options) => client.callTool({ name: "code", arguments: { code: `async () => await google.request(${JSON.stringify(options)})` } });
+
+	try {
+		await harness.listen();
+		await withMcpClient(undefined, async (client) => {
+			await t.test("rejects service/path mismatches and credential overrides before authentication", async () => {
+				for (const options of [
+					{ ...calendarList, path: gmailProfile.path }, { ...gmailProfile, path: calendarList.path },
+					{ ...calendarList, path: "/drive/v3/files" }, { ...calendarList, path: "https://evil.example/calendar/v3/calendars" },
+					{ ...calendarList, path: "/calendar/v3/../../drive/v3/files" }, { ...calendarList, path: "/calendar/v3/%2e%2e/drive" },
+					{ ...calendarList, query: { access_token: "evil" } }, { ...calendarList, scopes: ["evil"] },
+					{ ...calendarList, sub: "other@example.com" }, { ...calendarList, body: {} },
+				]) assert.equal((await invoke(client, options)).isError, true, JSON.stringify(options));
+
+				assert.equal(exchanges.length, 0);
+				assert.equal(requests.length, 0);
+			});
+			await t.test("deduplicates concurrent Calendar exchanges without combining Gmail scopes", async () => {
+				const result = await client.callTool({ name: "code", arguments: {
+					code: `async () => await Promise.all([google.request(${JSON.stringify(calendarList)}), google.request(${JSON.stringify(calendarList)}), google.request(${JSON.stringify(gmailProfile)})])`,
+				} });
+
+				assert.equal(result.isError, undefined);
+				assert.deepEqual(result.structuredContent.result, [payload, payload, { emailAddress: "joe@j1.io" }]);
+				assert.deepEqual(exchanges.toSorted(), ["calendar", "gmail"]);
+				assert.doesNotMatch(JSON.stringify(result), /isolated-token|PRIVATE KEY/);
+			});
+			await t.test("preserves Calendar IDs, repeated filters, pagination, recurrence and native write options", async () => {
+				payload = { items: [{ id: "event-1", recurrence: ["RRULE:FREQ=WEEKLY;BYDAY=MO"], start: { dateTime: "2026-11-02T09:00:00-05:00", timeZone: "America/New_York" } }], nextSyncToken: "native-sync+token" };
+				const list = await invoke(client, { ...calendarList, path: "/calendar/v3/calendars/team%40group.calendar.google.com/events", query: { privateExtendedProperty: ["a=1", "b=2"], pageToken: "native+cursor", singleEvents: false, maxResults: 2 } });
+				assert.deepEqual(list.structuredContent.result, payload);
+				const url = new URL(requests.at(-1).url);
+				assert.equal(url.pathname, "/calendar/v3/calendars/team%40group.calendar.google.com/events");
+				assert.deepEqual(url.searchParams.getAll("privateExtendedProperty"), ["a=1", "b=2"]);
+				assert.equal(url.searchParams.get("pageToken"), "native+cursor");
+				assert.equal(url.searchParams.get("singleEvents"), "false");
+
+				const body = { summary: "Fixture event", ...payload.items[0], end: { dateTime: "2026-11-02T10:00:00-05:00", timeZone: "America/New_York" }, attendees: [{ email: "fixture@example.com" }] };
+
+				for (const method of ["POST", "PUT", "PATCH"]) {
+					const result = await invoke(client, { service: "calendar", method, path: "/calendar/v3/calendars/primary/events" + (method === "POST" ? "" : "/event-1"), query: { sendUpdates: "none", conferenceDataVersion: 1 }, body });
+					assert.equal(result.isError, undefined);
+					assert.equal(requests.at(-1).method, method);
+					assert.equal(new URL(requests.at(-1).url).searchParams.get("sendUpdates"), "none");
+					assert.equal(requests.at(-1).headers.get("Content-Type"), "application/json");
+					assert.deepEqual(await requests.at(-1).json(), body);
+				}
+
+				apiStatus = 204;
+				assert.deepEqual((await invoke(client, { service: "calendar", method: "DELETE", path: "/calendar/v3/calendars/primary/events/event-1" })).structuredContent, { result: null });
+				apiStatus = 200;
+				assert.equal(exchanges.length, 2);
+			});
+			await t.test("retries reads and free/busy POST but never event mutations", async () => {
+				payload = { calendars: { primary: { busy: [] }, missing: { errors: [{ domain: "global", reason: "notFound" }] } } };
+				const freeBusy = { service: "calendar", method: "POST", path: "/calendar/v3/freeBusy", body: { timeMin: "2026-11-02T00:00:00Z", timeMax: "2026-11-03T00:00:00Z", items: [{ id: "primary" }, { id: "missing" }] } };
+
+				for (const options of [calendarList, freeBusy]) {
+					const before = requests.length;
+					failuresRemaining = 1;
+					assert.deepEqual((await invoke(client, options)).structuredContent.result, payload);
+					assert.equal(requests.length, before + 2);
+				}
+
+				for (const options of [
+					{ service: "calendar", method: "POST", path: "/calendar/v3/calendars/primary/events", body: {} },
+					{ service: "calendar", method: "PATCH", path: "/calendar/v3/calendars/primary/events/event-1", body: {} },
+					{ service: "calendar", method: "DELETE", path: "/calendar/v3/calendars/primary/events/event-1" },
+				]) {
+					const before = requests.length;
+					failuresRemaining = 1;
+					const result = await invoke(client, options);
+					assert.equal(result.isError, true);
+					assert.match(result.content[0].text, /rate_limited.*outcome=rejected/);
+					assert.equal(requests.length, before + 1);
+				}
+			});
+			await t.test("invalidates Calendar tokens independently and sanitizes missing-delegation failures", async () => {
+				apiStatus = 401;
+				const before = requests.length;
+				const result = await invoke(client, { service: "calendar", method: "POST", path: "/calendar/v3/calendars/primary/events", body: {} });
+				assert.equal(result.isError, true);
+				assert.doesNotMatch(JSON.stringify(result), /test-calendar-isolated-token/);
+				assert.equal(requests.length, before + 1);
+				apiStatus = 200;
+				rejectCalendarAuth = true;
+				const rejected = await invoke(client, calendarList);
+				assert.equal(rejected.isError, true);
+				assert.doesNotMatch(JSON.stringify(rejected), /private delegation failure|unauthorized_client|isolated-token/);
+				assert.equal(requests.length, before + 1);
+				assert.equal((await invoke(client, gmailProfile)).isError, undefined);
+				assert.equal(exchanges.filter((service) => service === "gmail").length, 1);
+				rejectCalendarAuth = false;
+				assert.equal((await invoke(client, calendarList)).isError, undefined);
+				assert.equal(exchanges.filter((service) => service === "calendar").length, 3);
+			});
+		}, harness);
+	} finally {
+		globalThis.fetch = originalFetch;
+		await harness.close();
 	}
 });
 

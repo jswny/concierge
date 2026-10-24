@@ -11,7 +11,7 @@ import { defineConnector } from "../../connector-definition";
 export const googleConnector = defineConnector({
 	id: "google",
 	label: "Google",
-	hint: "Call Google Workspace APIs as joe@j1.io through google.request. Gmail email and settings are enabled; consult official API documentation for request details.",
+	hint: "Call Google Workspace APIs as joe@j1.io through google.request. Gmail email/settings and Google Calendar events, calendars, sharing and availability are enabled; consult official API documentation for request details.",
 	create: ({ ctx, env, googleAuth, requests, usage }) => new GoogleConnector(ctx, env, googleAuth, requests, usage),
 });
 
@@ -25,17 +25,25 @@ const SERVICES = {
 			"https://www.googleapis.com/auth/gmail.settings.sharing",
 		],
 	},
+	calendar: {
+		origin: "https://www.googleapis.com",
+		pathPrefix: "/calendar/v3/",
+		scopes: ["https://www.googleapis.com/auth/calendar"],
+	},
 } as const;
+
+const READ_ONLY_POST_PATHS = new Set(["/calendar/v3/freeBusy"]);
 
 // SAFETY: SERVICES is a closed, server-owned object; its own enumerable keys are exactly its service names.
 const serviceNames = Object.keys(SERVICES) as Array<keyof typeof SERVICES>;
 
 const requestSchema = apiRequestSchema({
 	methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
-	pathPrefix: SERVICES.gmail.pathPrefix,
+	pathPrefix: "/",
 	queryArrays: true,
 }).safeExtend({
 	service: z.enum(serviceNames).describe("Enabled Google Workspace API."),
+	path: z.string().startsWith("/").describe("Relative API path: /gmail/v1/users/me/ for Gmail or /calendar/v3/ for Calendar. Put query parameters in query."),
 	body: z.unknown().optional().describe("Optional JSON request body. MIME messages use the Gmail API's base64url raw field."),
 });
 
@@ -57,8 +65,10 @@ export class GoogleConnector extends ObservedConnector<Env> {
 		return [
 			"Use for pre-authenticated Google Workspace REST API access as joe@j1.io.",
 			"Gmail is currently enabled, including messages, drafts, labels, sending, deletion, and settings.",
+			"Google Calendar is enabled, including events, calendar lists, calendars, sharing permissions, settings, and free/busy availability.",
 			"Consult the current official Google API documentation for endpoint methods, paths, query parameters, and JSON bodies.",
-			"Use /gmail/v1/users/me/ paths. Authentication, scopes, and the impersonated account are managed server-side and cannot be changed by tool arguments.",
+			"Use service gmail with /gmail/v1/users/me/ paths or service calendar with /calendar/v3/ paths. Authentication, scopes, and the impersonated account are managed server-side and cannot be changed by tool arguments.",
+			"Calendar IDs are native API IDs; primary selects the impersonated user's primary calendar. Preserve pagination/sync tokens, time zones, recurring events, and per-calendar free/busy errors. Calendar writes can send invitations or notifications according to native API options. No Calendar push notification receiver or MCP event source is implemented.",
 		].join(" ");
 	}
 
@@ -67,7 +77,7 @@ export class GoogleConnector extends ObservedConnector<Env> {
 			request: defineConnectorTool({
 				schema: requestSchema,
 				description:
-					"Call a Google Workspace REST API as joe@j1.io. Gmail is enabled for reading, sending, creating, updating, deleting email and managing settings. Consult official API documentation; use relative /gmail/v1/users/me/ paths. Returns the API JSON response, or null for an empty response.",
+					"Call a Google Workspace REST API as joe@j1.io. Use service gmail with /gmail/v1/users/me/ paths for reading, sending, creating, updating, deleting email and managing settings. Use service calendar with /calendar/v3/ paths for events, calendars, calendar lists, sharing/ACLs, settings and free/busy availability; primary selects the user's primary calendar. Calendar writes can send invitations/notifications through native API options. Preserve native pagination/sync tokens, time zones, recurrence and per-calendar free/busy errors. No Calendar push receiver or MCP events are implemented. Consult official API documentation. Returns the API JSON response, or null for an empty response.",
 				execute: (options) => this.request(options),
 			}),
 		};
@@ -79,6 +89,7 @@ export class GoogleConnector extends ObservedConnector<Env> {
 		return this.http.request(options, {
 			origin: service.origin, pathPrefix: service.pathPrefix,
 			operation: options.service,
+			readOnlyPostPaths: READ_ONLY_POST_PATHS,
 			authenticate: async () => {
 				const token = await this.auth.accessToken(service.scopes);
 

@@ -150,7 +150,7 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 			{ src: "https://concierge.j1.io/assets/concierge.svg", mimeType: "image/svg+xml", sizes: ["any"] },
 		]);
 		assert.match(tools[0].description, /- `maps`.*Routes API/);
-		assert.match(tools[0].description, /- `google`.*Gmail/);
+		assert.match(tools[0].description, /- `google`.*Gmail.*Google Calendar/);
 		assert.match(tools[0].description, /- `unifi`.*unifi\.request/);
 		assert.match(tools[0].description, /- `twilio`.*twilio\.request/);
 		assert.match(tools[0].description, /- `exa`.*exa\.request/);

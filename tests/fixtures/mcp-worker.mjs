@@ -109,7 +109,7 @@ export default {
 
 				return Response.json({ result, sameReference: result === (options.response ?? options.output), logs, executions, spans });
 			} catch (error) {
-				return Response.json({ error: error.message, logs, executions, spans });
+				return Response.json({ error: error instanceof Error ? error.message : String(error), logs, executions, spans });
 			} finally {
 				console.log = originalLog;
 				tracing.enterSpan = originalEnterSpan;

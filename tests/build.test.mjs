@@ -101,6 +101,11 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		if (url.hostname === "api.fantasypros.com") {
 			assert.equal(request.headers.get("x-api-key"), "unused-build-test-secret");
 			assert.equal(request.method, "GET");
+
+			if (url.pathname === "/public/v2/json/nfl/private-build-error-marker") {
+				return Response.json({ message: "private-build-response-marker" }, { status: 403 });
+			}
+
 			assert.equal(url.pathname, "/public/v2/json/nfl/2026/consensus-rankings");
 			assert.equal(url.searchParams.get("position"), "RB");
 
@@ -214,6 +219,17 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 
 		assert.equal(rankings.isError, undefined, JSON.stringify(rankings));
 		assert.deepEqual(rankings.structuredContent.result, { players: [{ player_id: 9001, rank_ecr: 1 }], scoring: "PPR" });
+
+		const failed = await client.callTool({ name: "code", arguments: {
+			code: "async () => await fantasypros.request({ method: 'GET', path: '/public/v2/json/nfl/private-build-error-marker', query: { filter: 'private-build-query-marker' } })",
+		} });
+
+		assert.equal(failed.isError, true);
+		assert.match(failed.content[0].text, /GET \/public\/v2\/json\/nfl\/private-build-error-marker: FantasyPros request: API returned HTTP 403/);
+		assert.doesNotMatch(failed.content[0].text, /private-build-query-marker|private-build-response-marker/);
+		const logs = harness.getLogs();
+		assert.ok(logs.some((log) => String(log.message).includes("codemode: fantasypros.request failed")));
+		assert.doesNotMatch(JSON.stringify(logs), /private-build-error-marker|private-build-query-marker|private-build-response-marker|unused-build-test-secret/);
 	} finally {
 		globalThis.fetch = originalFetch;
 		await client.close();

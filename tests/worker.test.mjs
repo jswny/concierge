@@ -3450,6 +3450,29 @@ test("shares bounded reliability behavior across connector operations", async (t
 		assert.match(result.results[0].error, /Retry-After: 60s/);
 		assert.equal(result.results[1].details.outcome, "not_started");
 	});
+	await t.test("fails fast above the five-second wait ceiling while preserving the provider cooldown", async () => {
+		const result = await run({
+			count: 2, limits: { concurrency: 1, timeoutMs: 30_000 },
+			failure: { category: "rate_limited", message: "Wait.", retryable: true, retryAfterMs: 6_000 },
+		});
+
+		assert.equal(result.attempts, 1);
+		assert.equal(result.results[0].details.retryAfterMs, 6_000);
+		assert.match(result.results[0].error, /Retry-After: 6s.*attempts=1/);
+		assert.equal(result.results[1].details.outcome, "not_started");
+		assert.equal(result.results[1].details.category, "rate_limited");
+		assert.ok(result.results[1].details.retryAfterMs > 5_000);
+		assert.match(result.results[1].error, /too long to wait automatically.*attempts=0/);
+
+		const boundary = await run({
+			limits: { maxRetryDelayMs: 40 }, failuresBeforeSuccess: 1,
+			failure: { category: "rate_limited", message: "Wait.", retryable: true, retryAfterMs: 40 },
+		});
+
+		assert.equal(boundary.attempts, 2);
+		assert.equal(boundary.results[0].result, "ok");
+		assert.ok(boundary.dispatchTimes[1] - boundary.dispatchTimes[0] >= 40);
+	});
 	await t.test("honors Retry-After and shares cooldowns with queued provider operations", async () => {
 		const result = await run({ count: 2, delayMs: 1, limits: { concurrency: 1 }, failuresBeforeSuccess: 1, failure: { category: "rate_limited", message: "Wait.", retryable: true, retryAfterMs: 40 } });
 		assert.equal(result.attempts, 3);
@@ -3621,6 +3644,54 @@ test("shares bounded reliability behavior across connector operations", async (t
 			globalThis.fetch = originalFetch;
 		}
 	});
+	await t.test("adds bounded method/path error context without query strings, credentials or authentication endpoints", async () => {
+		const originalFetch = globalThis.fetch;
+		let mode = "http";
+		let attempts = 0;
+		globalThis.fetch = async (input, init) => {
+			const request = new Request(input, init);
+			const credential = request.headers.get("X-Test-Credential") ?? request.headers.get("Authorization")?.slice(7);
+			attempts++;
+
+			if (mode === "network") throw new Error("private network failure");
+
+			if (mode === "invalid") return new Response("private invalid response", { headers: { "Content-Type": "application/json" } });
+
+			return Response.json({ message: `Rejected ${credential}` }, { status: mode === "authentication" ? 401 : 503 });
+		};
+
+		try {
+			for (const [currentMode, readOnly, expectedAttempts, outcome] of [["http", true, 3, "unknown"], ["network", true, 3, "unknown"], ["http", false, 1, "unknown"], ["invalid", false, 1, "succeeded"]]) {
+				mode = currentMode;
+				attempts = 0;
+
+				const failed = await run({
+					action: "request", readOnly, rotateAuth: true,
+					requestPath: "/api/private-path-marker/fixture-secret-1?query=private-query-marker#private-fragment-marker",
+				});
+
+				assert.equal(attempts, expectedAttempts);
+				assert.match(failed.error, new RegExp(`^${readOnly ? "GET" : "POST"} /api/private-path-marker/\\[redacted\\]: test operation:`));
+				assert.equal(failed.details.outcome, outcome);
+				assert.doesNotMatch(JSON.stringify(failed), /fixture-secret|private-query-marker|private-fragment-marker|reliability\.example|private network failure|private invalid response/);
+			}
+
+			mode = "http";
+			const encoded = await run({ action: "request", secret: "fixture-secret/private", requestPath: "/api/fixture-secret%2Fprivate", readOnly: false });
+			assert.match(encoded.error, /^POST \/api\/\[redacted\]:/);
+			assert.doesNotMatch(encoded.error, /fixture-secret/);
+
+			const bounded = await run({ action: "request", readOnly: false, requestPath: `/api/${"x".repeat(2_000)}` });
+			assert.ok(bounded.error.split(": test operation:")[0].length <= 1_005);
+
+			mode = "authentication";
+			const sensitive = await run({ action: "request", sensitive: true, requestPath: "/private-auth-endpoint?assertion=private-assertion" });
+			assert.match(sensitive.error, /authentication/);
+			assert.doesNotMatch(JSON.stringify(sensitive), /private-auth-endpoint|private-assertion|fixture-secret/);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
 	await t.test("HTTP requests include preparation in deadlines and redact credentials", async () => {
 		const originalFetch = globalThis.fetch;
 		let requests = 0;
@@ -3772,6 +3843,18 @@ test("applies shared reliability to real MCP connector calls without replaying C
 				const result = await invoke(client, `async () => { try { return await ${write}; } catch (error) { return String(error); } }`);
 				assert.equal(writes, 1);
 				assert.match(result.structuredContent.result, /safe_to_replay=false.*outcome=unknown.*verify external state/);
+			});
+			await t.test("returns method/path context to the MCP caller without adding it to operational logs", async () => {
+				mode = "google-permission"; googleCalls = 0;
+				debugServer.clearLogs();
+				const failed = await invoke(client, "async () => await google.request({ service: 'gmail', method: 'GET', path: '/gmail/v1/users/me/messages/private-path-marker', query: { q: 'private-query-marker' } })");
+				assert.equal(failed.isError, true);
+				assert.equal(googleCalls, 1);
+				assert.match(failed.content[0].text, /GET \/gmail\/v1\/users\/me\/messages\/private-path-marker: Google gmail: API returned HTTP 403/);
+				assert.doesNotMatch(failed.content[0].text, /private-query-marker|gmail\.googleapis\.com|private forbidden/);
+
+				await waitFor(() => usageEvents(debugServer, '{"event":"code_execution"').length ? true : undefined, "failed request metadata");
+				assert.doesNotMatch(JSON.stringify(debugServer.getLogs()), /private-path-marker|private-query-marker/);
 			});
 			await t.test("distinguishes Gmail 403 rate limits from permissions without replaying writes", async () => {
 				const profile = "google.request({ service: 'gmail', method: 'GET', path: '/gmail/v1/users/me/profile' })";

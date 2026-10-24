@@ -32,6 +32,8 @@ export abstract class ObservedConnector<E> extends CodemodeConnector<E> {
 					status = "success";
 
 					return result;
+				} catch (error) {
+					throw new ModelFacingFailure(error instanceof Error ? error.message : String(error));
 				} finally {
 					this.usage.connectorCall({
 						connector: this.name(), method: name, sequence, status, durationMs: Date.now() - startedAt,
@@ -41,5 +43,19 @@ export abstract class ObservedConnector<E> extends CodemodeConnector<E> {
 				}
 			}),
 		};
+	}
+}
+
+// Code Mode logs thrown values, then String(value) supplies the sandbox error.
+// Private state keeps model-facing details out of object inspection and JSON logs.
+class ModelFacingFailure {
+	#message: string;
+
+	constructor(message: string) {
+		this.#message = message;
+	}
+
+	toString() {
+		return this.#message;
 	}
 }

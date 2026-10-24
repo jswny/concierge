@@ -98,6 +98,7 @@ type Limits = {
 	maxQueued: number;
 	maxResponseBytes: number;
 	backoffMs: number;
+	maxRetryDelayMs: number;
 };
 
 const DEFAULTS: Limits = {
@@ -107,6 +108,7 @@ const DEFAULTS: Limits = {
 	maxQueued: 32,
 	maxResponseBytes: 4 * 1024 * 1024,
 	backoffMs: 250,
+	maxRetryDelayMs: 5_000,
 };
 
 const requestFactorySchema = z.function();
@@ -147,10 +149,10 @@ export class ConnectorRequests {
 				let cooldown;
 
 				while ((cooldown = (this.cooldowns.get(operation.connector) ?? 0) - Date.now()) > 0) {
-					if (cooldown >= deadline - Date.now())
+					if (cooldown > this.limits.maxRetryDelayMs || cooldown >= deadline - Date.now())
 						throw new ConnectorError({
 							category: "rate_limited",
-							message: "Provider cooldown exceeds the operation deadline.",
+							message: "Provider cooldown is too long to wait automatically.",
 							retryable: true,
 							retryAfterMs: cooldown,
 							outcome,
@@ -203,10 +205,10 @@ export class ConnectorRequests {
 
 					const delay = Math.max(
 						retryAfterMs ?? 0,
-						this.limits.backoffMs * 2 ** (attempts - 1) * (0.5 + Math.random()),
+						Math.min(this.limits.maxRetryDelayMs, this.limits.backoffMs * 2 ** (attempts - 1) * (0.5 + Math.random())),
 					);
 
-					if (delay >= deadline - Date.now()) throw failure;
+					if (delay > this.limits.maxRetryDelayMs || delay >= deadline - Date.now()) throw failure;
 					await wait(delay, controller.signal);
 				}
 			}
@@ -254,33 +256,48 @@ export class ConnectorRequests {
 
 	request(options: HttpRequest & { format?: JsonResponseFormat }): Promise<JsonValue>;
 	request(options: HttpRequest): Promise<ApiPayload>;
-	request(options: HttpRequest): Promise<ApiPayload> {
-		return this.run(options, async (attempt) => {
-			const authentication = await options.authenticate?.();
-			const headers = new Headers(options.headers);
+	async request(options: HttpRequest): Promise<ApiPayload> {
+		let errorPath = options.url.pathname;
 
-			for (const [name, value] of new Headers(authentication?.headers)) headers.set(name, value);
+		try {
+			return await this.run(options, async (attempt) => {
+				const authentication = await options.authenticate?.();
+				const headers = new Headers(options.headers);
 
-			const body = isRequestFactory(options.body) ? await options.body() : options.body;
-			headers.set("Accept", responseAccept(options.format));
+				for (const secret of authentication?.sensitiveValues ?? []) {
+					errorPath = errorPath.replaceAll(secret, "[redacted]").replaceAll(encodeURIComponent(secret), "[redacted]");
+				}
 
-			if (options.body !== undefined && !headers.has("Content-Type"))
-				headers.set("Content-Type", RESPONSE_TYPES.json.mimeType);
-			attempt.signal.throwIfAborted();
-			attempt.dispatch();
+				for (const [name, value] of new Headers(authentication?.headers)) headers.set(name, value);
 
-			const response = await fetch(options.url, {
-				method: options.method ?? "GET",
-				headers,
-				body,
-				redirect: "manual",
-				signal: attempt.signal,
+				const body = isRequestFactory(options.body) ? await options.body() : options.body;
+				headers.set("Accept", responseAccept(options.format));
+
+				if (options.body !== undefined && !headers.has("Content-Type"))
+					headers.set("Content-Type", RESPONSE_TYPES.json.mimeType);
+				attempt.signal.throwIfAborted();
+				attempt.dispatch();
+
+				const response = await fetch(options.url, {
+					method: options.method ?? "GET",
+					headers,
+					body,
+					redirect: "manual",
+					signal: attempt.signal,
+				});
+
+				options.onResponse?.(response, headers);
+
+				return this.responsePayload(response, attempt, { ...options, sensitiveValues: authentication?.sensitiveValues });
 			});
+		} catch (error) {
+			if (!(error instanceof ConnectorError) || options.sensitive) throw error;
 
-			options.onResponse?.(response, headers);
-
-			return this.responsePayload(response, attempt, { ...options, sensitiveValues: authentication?.sensitiveValues });
-		});
+			throw new ConnectorError({
+				...error.details,
+				message: `${options.method ?? "GET"} ${sanitize(errorPath, [])}: ${error.message}`,
+			});
+		}
 	}
 
 	responsePayload(response: Response, attempt: Attempt, options?: ResponseOptions & { format?: JsonResponseFormat }): Promise<JsonValue>;

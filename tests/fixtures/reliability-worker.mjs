@@ -119,11 +119,12 @@ export default {
 
 				const result = await runtime.request({
 					...operation,
-					url: new URL("https://reliability.example/api"),
+					url: new URL(options.requestPath ?? "/api", "https://reliability.example"),
 					method: options.readOnly === false ? "POST" : "GET",
+					sensitive: options.sensitive,
 					authenticate: async () => {
 						await new Promise((resolve) => setTimeout(resolve, options.prepareMs ?? 0));
-						const secret = options.rotateAuth ? `fixture-secret-${++authentications}` : "fixture-secret";
+						const secret = options.rotateAuth ? `fixture-secret-${++authentications}` : (options.secret ?? "fixture-secret");
 
 						return {
 							headers: options.rotateAuth ? { "X-Test-Credential": secret } : { Authorization: `Bearer ${secret}` },

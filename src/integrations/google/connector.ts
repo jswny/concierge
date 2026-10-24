@@ -3,7 +3,7 @@ import { UsageLog } from "../../usage-logging";
 import { z } from "zod";
 import { GoogleWorkspaceAuth } from "./auth";
 import { ConnectorRequests, type ApiFailure, type ApiPayload } from "../../connector-requests";
-import { ConnectorHttp } from "../../connector-http";
+import { ConnectorHttp, selectApiService } from "../../connector-http";
 import { apiRequestSchema } from "../../connector-inputs";
 import { defineConnectorTool, type ConciergeTools } from "../../connector-tools";
 import { defineConnector } from "../../connector-definition";
@@ -15,8 +15,9 @@ export const googleConnector = defineConnector({
 	create: ({ ctx, env, googleAuth, requests, usage }) => new GoogleConnector(ctx, env, googleAuth, requests, usage),
 });
 
-const SERVICES = {
-	gmail: {
+const SERVICES = [
+	{
+		id: "gmail",
 		origin: "https://gmail.googleapis.com",
 		pathPrefix: "/gmail/v1/users/me/",
 		scopes: [
@@ -25,24 +26,21 @@ const SERVICES = {
 			"https://www.googleapis.com/auth/gmail.settings.sharing",
 		],
 	},
-	calendar: {
+	{
+		id: "calendar",
 		origin: "https://www.googleapis.com",
 		pathPrefix: "/calendar/v3/",
 		scopes: ["https://www.googleapis.com/auth/calendar"],
 	},
-} as const;
+] as const;
 
 const READ_ONLY_POST_PATHS = new Set(["/calendar/v3/freeBusy"]);
-
-// SAFETY: SERVICES is a closed, server-owned object; its own enumerable keys are exactly its service names.
-const serviceNames = Object.keys(SERVICES) as Array<keyof typeof SERVICES>;
 
 const requestSchema = apiRequestSchema({
 	methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
 	pathPrefix: "/",
 	queryArrays: true,
 }).safeExtend({
-	service: z.enum(serviceNames).describe("Enabled Google Workspace API."),
 	path: z.string().startsWith("/").describe("Relative API path: /gmail/v1/users/me/ for Gmail or /calendar/v3/ for Calendar. Put query parameters in query."),
 	body: z.unknown().optional().describe("Optional JSON request body. MIME messages use the Gmail API's base64url raw field."),
 });
@@ -67,7 +65,7 @@ export class GoogleConnector extends ObservedConnector<Env> {
 			"Gmail is currently enabled, including messages, drafts, labels, sending, deletion, and settings.",
 			"Google Calendar is enabled, including events, calendar lists, calendars, sharing permissions, settings, and free/busy availability.",
 			"Consult the current official Google API documentation for endpoint methods, paths, query parameters, and JSON bodies.",
-			"Use service gmail with /gmail/v1/users/me/ paths or service calendar with /calendar/v3/ paths. Authentication, scopes, and the impersonated account are managed server-side and cannot be changed by tool arguments.",
+			"Use /gmail/v1/users/me/ paths for Gmail or /calendar/v3/ paths for Calendar. The path selects the API; authentication, scopes, and the impersonated account are managed server-side and cannot be changed by tool arguments.",
 			"Calendar IDs are native API IDs; primary selects the impersonated user's primary calendar. Preserve pagination/sync tokens, time zones, recurring events, and per-calendar free/busy errors. Calendar writes can send invitations or notifications according to native API options. No Calendar push notification receiver or MCP event source is implemented.",
 		].join(" ");
 	}
@@ -77,18 +75,18 @@ export class GoogleConnector extends ObservedConnector<Env> {
 			request: defineConnectorTool({
 				schema: requestSchema,
 				description:
-					"Call a Google Workspace REST API as joe@j1.io. Use service gmail with /gmail/v1/users/me/ paths for reading, sending, creating, updating, deleting email and managing settings. Use service calendar with /calendar/v3/ paths for events, calendars, calendar lists, sharing/ACLs, settings and free/busy availability; primary selects the user's primary calendar. Calendar writes can send invitations/notifications through native API options. Preserve native pagination/sync tokens, time zones, recurrence and per-calendar free/busy errors. No Calendar push receiver or MCP events are implemented. Consult official API documentation. Returns the API JSON response, or null for an empty response.",
+					"Call a Google Workspace REST API as joe@j1.io. The native path selects the API: /gmail/v1/users/me/ for reading, sending, creating, updating, deleting email and managing settings; /calendar/v3/ for events, calendars, calendar lists, sharing/ACLs, settings and free/busy availability. Calendar ID primary selects the user's primary calendar. Calendar writes can send invitations/notifications through native API options. Preserve native pagination/sync tokens, time zones, recurrence and per-calendar free/busy errors. No Calendar push receiver or MCP events are implemented. Consult official API documentation. Returns the API JSON response, or null for an empty response.",
 				execute: (options) => this.request(options),
 			}),
 		};
 	}
 
 	private async request(options: GoogleRequest) {
-		const service = SERVICES[options.service];
+		const service = selectApiService(options.path, SERVICES);
 
 		return this.http.request(options, {
 			origin: service.origin, pathPrefix: service.pathPrefix,
-			operation: options.service,
+			operation: service.id,
 			readOnlyPostPaths: READ_ONLY_POST_PATHS,
 			authenticate: async () => {
 				const token = await this.auth.accessToken(service.scopes);

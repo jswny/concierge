@@ -1463,7 +1463,7 @@ test("rejects invalid Google request arguments before outbound calls", async () 
 		await withMcpClient(undefined, async (client) => {
 			for (const fields of ["query: { value: NaN }", "query: { value: Infinity }", "query: { value: {} }", "query: { values: [{}] }", "body: {}", "extra: true", "method: 'TRACE'"]) {
 				const result = await client.callTool({ name: "code", arguments: {
-					code: `async () => await google.request({ service: 'gmail', method: 'GET', path: '/gmail/v1/users/me/profile', ${fields} })`,
+					code: `async () => await google.request({ method: 'GET', path: '/gmail/v1/users/me/profile', ${fields} })`,
 				} });
 
 				assert.equal(result.isError, true, fields);
@@ -2725,12 +2725,13 @@ test("calls Maps with native query/body, server-owned credentials, and unchanged
 			} });
 
 			assert.ok(docs.structuredContent.result.search.results.some((match) => match.path === "maps.request"));
-			assert.match(docs.structuredContent.result.docs.types, /places/);
+			assert.match(docs.structuredContent.result.docs.types, /Places/);
+			assert.doesNotMatch(docs.structuredContent.result.docs.types, /service[?:]/);
 
 			for (const options of [
-				{ service: "places", method: "POST", path: "/v1/places:searchText", query: { fields: "places.id,places.rating,places.userRatingCount" }, body: { textQuery: "coffee shops in Brooklyn", pageSize: 1 } },
-				{ service: "places", method: "GET", path: "/v1/places/test-place", query: { "$fields": "id,rating,userRatingCount", languageCode: "en" } },
-				{ service: "places", method: "GET", path: "/v1/places/test-place/photos/photo/media", query: { skipHttpRedirect: true, maxWidthPx: 100 } },
+				{ method: "POST", path: "/v1/places:searchText", query: { fields: "places.id,places.rating,places.userRatingCount" }, body: { textQuery: "coffee shops in Brooklyn", pageSize: 1 } },
+				{ method: "GET", path: "/v1/places/test-place", query: { "$fields": "id,rating,userRatingCount", languageCode: "en" } },
+				{ method: "GET", path: "/v1/places/test-place/photos/photo/media", query: { skipHttpRedirect: true, maxWidthPx: 100 } },
 			]) {
 				const result = await client.callTool({ name: "code", arguments: { code: `async () => await maps.request(${JSON.stringify(options)})` } });
 				assert.equal(result.isError, undefined);
@@ -2775,14 +2776,14 @@ test("calls Routes and route matrices with native bodies, masks, and unchanged p
 			} });
 
 			assert.ok(docs.structuredContent.result.search.results.some((match) => match.path === "maps.request"));
-			assert.match(docs.structuredContent.result.docs.types, /routes/);
+			assert.match(docs.structuredContent.result.docs.types, /computeRoutes/);
 			assert.match(docs.structuredContent.result.docs.types, /computeRouteMatrix/);
 			const origin = { location: { latLng: { latitude: 40.7484, longitude: -73.9857 } } };
 			const destination = { address: "Grand Central Terminal, New York" };
 
 			for (const [options, payload] of [
-				[{ service: "routes", method: "POST", path: "/directions/v2:computeRoutes", query: { fields: "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline" }, body: { origin, destination, travelMode: "WALK" } }, routes],
-				[{ service: "routes", method: "POST", path: "/distanceMatrix/v2:computeRouteMatrix", query: { "$fields": "originIndex,destinationIndex,status,condition,distanceMeters,duration" }, body: { origins: [{ waypoint: origin }], destinations: [{ waypoint: destination }, { waypoint: { address: "Test destination" } }], travelMode: "DRIVE" } }, matrix],
+				[{ method: "POST", path: "/directions/v2:computeRoutes", query: { fields: "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline" }, body: { origin, destination, travelMode: "WALK" } }, routes],
+				[{ method: "POST", path: "/distanceMatrix/v2:computeRouteMatrix", query: { "$fields": "originIndex,destinationIndex,status,condition,distanceMeters,duration" }, body: { origins: [{ waypoint: origin }], destinations: [{ waypoint: destination }, { waypoint: { address: "Test destination" } }], travelMode: "DRIVE" } }, matrix],
 			]) {
 				const result = await client.callTool({ name: "code", arguments: { code: `async () => await maps.request(${JSON.stringify(options)})` } });
 				assert.equal(result.isError, undefined);
@@ -2814,10 +2815,10 @@ test("rejects Maps credential overrides, invalid inputs, and endpoint escapes be
 
 	try {
 		await withMcpClient(undefined, async (client) => {
-			const base = { service: "places", method: "GET", path: "/v1/places/test-place" };
+			const base = { method: "GET", path: "/v1/places/test-place" };
 
 			for (const override of [
-				{ service: "gmail" }, { method: "DELETE" }, { body: {} }, { fields: ["rating"] },
+				{ service: "gmail" }, { service: "places" }, { method: "DELETE" }, { body: {} }, { fields: ["rating"] },
 				{ headers: { "X-Goog-Api-Key": "caller-key" } }, { query: { key: "caller-key" } },
 				{ query: { access_token: "caller-token" } }, { query: { nested: {} } },
 				{ path: "https://evil.example/v1/places/test-place" }, { path: "/v1/../token" },
@@ -2827,11 +2828,11 @@ test("rejects Maps credential overrides, invalid inputs, and endpoint escapes be
 				assert.equal(result.isError, true, JSON.stringify(override));
 			}
 
-			const route = { service: "routes", method: "POST", path: "/directions/v2:computeRoutes", body: {} };
+			const route = { method: "POST", path: "/directions/v2:computeRoutes", body: {} };
 
 			for (const override of [
 				{ method: "GET" }, { method: "DELETE" }, { service: "places" },
-				{ path: "/v1/places:searchText" }, { path: "/directions/v2:futureOperation" },
+				{ service: "routes" }, { path: "/v1x/places:searchText" }, { path: "/directions/v2:futureOperation" },
 				{ path: "https://evil.example/directions/v2:computeRoutes" },
 				{ path: "/directions/v2:computeRoutes?key=caller-key" },
 				{ headers: { "X-Goog-Api-Key": "caller-key" } }, { query: { key: "caller-key" } },
@@ -2862,7 +2863,7 @@ test("Maps retries known read-only POSTs, never assumes arbitrary POSTs are safe
 
 	try {
 		await withMcpClient(undefined, async (client) => {
-			const invoke = (path) => client.callTool({ name: "code", arguments: { code: `async () => await maps.request({ service: 'places', method: 'POST', path: '${path}', query: { fields: 'places.id' }, body: {} })` } });
+			const invoke = (path) => client.callTool({ name: "code", arguments: { code: `async () => await maps.request({ method: 'POST', path: '${path}', query: { fields: 'places.id' }, body: {} })` } });
 			assert.equal((await invoke("/v1/places:searchText")).isError, undefined);
 			assert.equal(calls, 2);
 			calls = 0;
@@ -2899,13 +2900,13 @@ test("Routes retries both read-only POST endpoints and redacts denied requests",
 		await withMcpClient(undefined, async (client) => {
 			for (const path of ["/directions/v2:computeRoutes", "/distanceMatrix/v2:computeRouteMatrix"]) {
 				calls = 0;
-				const result = await client.callTool({ name: "code", arguments: { code: `async () => await maps.request({ service: 'routes', method: 'POST', path: '${path}', query: { fields: 'status' }, body: {} })` } });
+				const result = await client.callTool({ name: "code", arguments: { code: `async () => await maps.request({ method: 'POST', path: '${path}', query: { fields: 'status' }, body: {} })` } });
 				assert.equal(result.isError, undefined);
 				assert.equal(calls, 2);
 			}
 
 			calls = 0; denied = true;
-			const result = await client.callTool({ name: "code", arguments: { code: "async () => await maps.request({ service: 'routes', method: 'POST', path: '/directions/v2:computeRoutes', body: {} })" } });
+			const result = await client.callTool({ name: "code", arguments: { code: "async () => await maps.request({ method: 'POST', path: '/directions/v2:computeRoutes', body: {} })" } });
 			assert.equal(result.isError, true);
 			assert.equal(calls, 1);
 			assert.doesNotMatch(JSON.stringify(result), /test-maps-api-key|Rejected/);
@@ -2920,7 +2921,7 @@ test("Maps fails clearly when its API key is missing", async () => {
 		await harness.listen();
 		await withMcpClient(undefined, async (client) => {
 			const result = await client.callTool({ name: "code", arguments: {
-				code: "async () => await maps.request({ service: 'places', method: 'GET', path: '/v1/places/test-place', query: { fields: 'id' } })",
+				code: "async () => await maps.request({ method: 'GET', path: '/v1/places/test-place', query: { fields: 'id' } })",
 			} });
 
 			assert.equal(result.isError, true);
@@ -2938,11 +2939,11 @@ test("schema-parsed error metadata preserves HTTP failures and valid sibling fie
 			status: 400, payload: { message: { private: "private-metadata" }, code: 21614 }, expected: /code=21614/ },
 		{ code: "async () => await unifi.request({ method: 'POST', path: '/v1/hosts', body: {} })",
 			status: 400, payload: { message: ["private-metadata"], code: "native-unifi-code", traceId: {} }, expected: /code=native-unifi-code/ },
-		{ code: "async () => await maps.request({ service: 'places', method: 'POST', path: '/v1/places:searchText', body: {} })",
+		{ code: "async () => await maps.request({ method: 'POST', path: '/v1/places:searchText', body: {} })",
 			status: 400, payload: { error: { message: 12, status: "INVALID_ARGUMENT", future: "private-metadata" } }, expected: /code=INVALID_ARGUMENT/ },
 		{ code: "async () => await exa.request({ method: 'POST', path: '/agent/runs', body: {} })",
 			status: 400, payload: { error: { message: ["private-metadata"], code: "native-exa-code" }, tag: 12, requestId: [] }, expected: /code=native-exa-code/ },
-		{ code: "async () => await google.request({ service: 'gmail', method: 'POST', path: '/gmail/v1/users/me/messages/send', body: {} })",
+		{ code: "async () => await google.request({ method: 'POST', path: '/gmail/v1/users/me/messages/send', body: {} })",
 			status: 403, payload: { error: { message: false, errors: [false, { reason: 12 }, { reason: "rateLimitExceeded" }] } }, expected: /rate_limited/ },
 	];
 
@@ -3030,13 +3031,14 @@ test("calls Google Workspace through signed JWTs, fixed delegation, and a privat
 		code: `async () => await google.request(${JSON.stringify(options)})`,
 	} });
 
-	const profile = { service: "gmail", method: "GET", path: "/gmail/v1/users/me/profile" };
+	const profile = { method: "GET", path: "/gmail/v1/users/me/profile" };
 
 	try {
 		await withMcpClient(undefined, async (client) => {
-			await t.test("rejects invalid services, external URLs, other users, traversal, and caller-selected credentials before authentication", async () => {
+			await t.test("rejects service overrides, unsupported paths, external URLs, other users, traversal, and caller-selected credentials before authentication", async () => {
 				for (const options of [
 					{ ...profile, service: "drive" },
+					{ ...profile, service: "gmail" },
 					{ ...profile, method: "TRACE" },
 					{ ...profile, path: "https://evil.example/steal" },
 					{ ...profile, path: "/gmail/v1/users/other@example.com/profile" },
@@ -3073,13 +3075,13 @@ test("calls Google Workspace through signed JWTs, fixed delegation, and a privat
 				assert.equal(new URL(list.url).searchParams.get("maxResults"), "2");
 				assert.equal(list.method, "GET");
 				const body = { name: "Test" };
-				await call(client, { service: "gmail", method: "POST", path: "/gmail/v1/users/me/labels", body });
+				await call(client, { method: "POST", path: "/gmail/v1/users/me/labels", body });
 				assert.equal(requests.at(-1).method, "POST");
 				assert.deepEqual(await requests.at(-1).json(), body);
-				await call(client, { service: "gmail", method: "PUT", path: "/gmail/v1/users/me/settings/language", body: { displayLanguage: "en" } });
+				await call(client, { method: "PUT", path: "/gmail/v1/users/me/settings/language", body: { displayLanguage: "en" } });
 				assert.equal(requests.at(-1).method, "PUT");
 				apiStatus = 204;
-				assert.deepEqual((await call(client, { service: "gmail", method: "DELETE", path: "/gmail/v1/users/me/labels/test" })).structuredContent, { result: null });
+				assert.deepEqual((await call(client, { method: "DELETE", path: "/gmail/v1/users/me/labels/test" })).structuredContent, { result: null });
 				apiStatus = 200;
 				assert.equal(count("oauth2.googleapis.com"), 1);
 			});
@@ -3087,7 +3089,7 @@ test("calls Google Workspace through signed JWTs, fixed delegation, and a privat
 				apiStatus = 401;
 				apiPayload = { error: { message: "Rejected test-google-workspace-token" } };
 				const before = count("gmail.googleapis.com");
-				const result = await call(client, { service: "gmail", method: "POST", path: "/gmail/v1/users/me/messages/send", body: { raw: "test" } });
+				const result = await call(client, { method: "POST", path: "/gmail/v1/users/me/messages/send", body: { raw: "test" } });
 				assert.equal(result.isError, true);
 				assert.match(result.content[0].text, /HTTP 401/);
 				assert.doesNotMatch(result.content[0].text, /test-google-workspace-token/);
@@ -3210,16 +3212,16 @@ test("supports Calendar with isolated delegated scopes, native requests and safe
 		return Response.json(payload);
 	};
 
-	const calendarList = { service: "calendar", method: "GET", path: "/calendar/v3/users/me/calendarList" };
-	const gmailProfile = { service: "gmail", method: "GET", path: "/gmail/v1/users/me/profile" };
+	const calendarList = { method: "GET", path: "/calendar/v3/users/me/calendarList" };
+	const gmailProfile = { method: "GET", path: "/gmail/v1/users/me/profile" };
 	const invoke = (client, options) => client.callTool({ name: "code", arguments: { code: `async () => await google.request(${JSON.stringify(options)})` } });
 
 	try {
 		await harness.listen();
 		await withMcpClient(undefined, async (client) => {
-			await t.test("rejects service/path mismatches and credential overrides before authentication", async () => {
+			await t.test("rejects legacy service selectors, unsupported paths and credential overrides before authentication", async () => {
 				for (const options of [
-					{ ...calendarList, path: gmailProfile.path }, { ...gmailProfile, path: calendarList.path },
+					{ ...calendarList, service: "calendar" }, { ...gmailProfile, service: "gmail" },
 					{ ...calendarList, path: "/drive/v3/files" }, { ...calendarList, path: "https://evil.example/calendar/v3/calendars" },
 					{ ...calendarList, path: "/calendar/v3/../../drive/v3/files" }, { ...calendarList, path: "/calendar/v3/%2e%2e/drive" },
 					{ ...calendarList, query: { access_token: "evil" } }, { ...calendarList, scopes: ["evil"] },
@@ -3252,7 +3254,7 @@ test("supports Calendar with isolated delegated scopes, native requests and safe
 				const body = { summary: "Fixture event", ...payload.items[0], end: { dateTime: "2026-11-02T10:00:00-05:00", timeZone: "America/New_York" }, attendees: [{ email: "fixture@example.com" }] };
 
 				for (const method of ["POST", "PUT", "PATCH"]) {
-					const result = await invoke(client, { service: "calendar", method, path: "/calendar/v3/calendars/primary/events" + (method === "POST" ? "" : "/event-1"), query: { sendUpdates: "none", conferenceDataVersion: 1 }, body });
+					const result = await invoke(client, { method, path: "/calendar/v3/calendars/primary/events" + (method === "POST" ? "" : "/event-1"), query: { sendUpdates: "none", conferenceDataVersion: 1 }, body });
 					assert.equal(result.isError, undefined);
 					assert.equal(requests.at(-1).method, method);
 					assert.equal(new URL(requests.at(-1).url).searchParams.get("sendUpdates"), "none");
@@ -3261,13 +3263,13 @@ test("supports Calendar with isolated delegated scopes, native requests and safe
 				}
 
 				apiStatus = 204;
-				assert.deepEqual((await invoke(client, { service: "calendar", method: "DELETE", path: "/calendar/v3/calendars/primary/events/event-1" })).structuredContent, { result: null });
+				assert.deepEqual((await invoke(client, { method: "DELETE", path: "/calendar/v3/calendars/primary/events/event-1" })).structuredContent, { result: null });
 				apiStatus = 200;
 				assert.equal(exchanges.length, 2);
 			});
 			await t.test("retries reads and free/busy POST but never event mutations", async () => {
 				payload = { calendars: { primary: { busy: [] }, missing: { errors: [{ domain: "global", reason: "notFound" }] } } };
-				const freeBusy = { service: "calendar", method: "POST", path: "/calendar/v3/freeBusy", body: { timeMin: "2026-11-02T00:00:00Z", timeMax: "2026-11-03T00:00:00Z", items: [{ id: "primary" }, { id: "missing" }] } };
+				const freeBusy = { method: "POST", path: "/calendar/v3/freeBusy", body: { timeMin: "2026-11-02T00:00:00Z", timeMax: "2026-11-03T00:00:00Z", items: [{ id: "primary" }, { id: "missing" }] } };
 
 				for (const options of [calendarList, freeBusy]) {
 					const before = requests.length;
@@ -3277,9 +3279,9 @@ test("supports Calendar with isolated delegated scopes, native requests and safe
 				}
 
 				for (const options of [
-					{ service: "calendar", method: "POST", path: "/calendar/v3/calendars/primary/events", body: {} },
-					{ service: "calendar", method: "PATCH", path: "/calendar/v3/calendars/primary/events/event-1", body: {} },
-					{ service: "calendar", method: "DELETE", path: "/calendar/v3/calendars/primary/events/event-1" },
+					{ method: "POST", path: "/calendar/v3/calendars/primary/events", body: {} },
+					{ method: "PATCH", path: "/calendar/v3/calendars/primary/events/event-1", body: {} },
+					{ method: "DELETE", path: "/calendar/v3/calendars/primary/events/event-1" },
 				]) {
 					const before = requests.length;
 					failuresRemaining = 1;
@@ -3292,7 +3294,7 @@ test("supports Calendar with isolated delegated scopes, native requests and safe
 			await t.test("invalidates Calendar tokens independently and sanitizes missing-delegation failures", async () => {
 				apiStatus = 401;
 				const before = requests.length;
-				const result = await invoke(client, { service: "calendar", method: "POST", path: "/calendar/v3/calendars/primary/events", body: {} });
+				const result = await invoke(client, { method: "POST", path: "/calendar/v3/calendars/primary/events", body: {} });
 				assert.equal(result.isError, true);
 				assert.doesNotMatch(JSON.stringify(result), /test-calendar-isolated-token/);
 				assert.equal(requests.length, before + 1);
@@ -3338,6 +3340,12 @@ test("shares bounded reliability behavior across connector operations", async (t
 					assert.equal(descriptor.inputSchema.type, "object");
 					assert.equal(descriptor.inputSchema.additionalProperties, false);
 					assert.equal(descriptor.inputSchema.$schema, "http://json-schema.org/draft-07/schema#");
+
+					if (entry.id === "google" || entry.id === "maps") {
+						assert.deepEqual(descriptor.inputSchema.required, ["method", "path"]);
+						assert.equal(Object.hasOwn(descriptor.inputSchema.properties, "service"), false);
+					}
+
 					assert.ok(!["headers", "credentials", "apiKey", "privateKey", "scopes", "origin"].some((key) => key in descriptor.inputSchema.properties));
 					assert.equal(entry.description.annotations?.[method]?.requiresApproval, undefined);
 					assert.equal(entry.description.annotations?.[method]?.replay, entry.id === "cloudflare" ? "reexecute" : undefined);
@@ -3402,13 +3410,29 @@ test("shares bounded reliability behavior across connector operations", async (t
 			assert.ok((await run({ action: "inputs", contract, args: invalid })).error, JSON.stringify(invalid));
 		}
 
-		const googleContract = { ...contract, queryArrays: true, extraKeys: ["service"] };
-		const googleArgs = { ...args, service: "gmail", query: { values: ["one", 2, true] } };
-		assert.deepEqual((await run({ action: "inputs", contract: googleContract, args: googleArgs })).result, googleArgs);
-		const googleSchema = (await run({ action: "inputs", contract: googleContract, args: googleArgs })).inputSchema;
-		assert.ok(googleSchema.required.includes("service"));
-		assert.ok(googleSchema.properties.query.additionalProperties.anyOf.some((entry) => entry.type === "array"));
-		assert.ok((await run({ action: "inputs", contract: googleContract, args: { ...googleArgs, query: { nested: [["one"]] } } })).error);
+		const arrayContract = { ...contract, queryArrays: true };
+		const arrayArgs = { ...args, query: { values: ["one", 2, true] } };
+		assert.deepEqual((await run({ action: "inputs", contract: arrayContract, args: arrayArgs })).result, arrayArgs);
+		const arraySchema = (await run({ action: "inputs", contract: arrayContract, args: arrayArgs })).inputSchema;
+		assert.deepEqual(arraySchema.required, ["method", "path"]);
+		assert.ok(arraySchema.properties.query.additionalProperties.anyOf.some((entry) => entry.type === "array"));
+		assert.ok((await run({ action: "inputs", contract: arrayContract, args: { ...arrayArgs, query: { nested: [["one"]] } } })).error);
+	});
+	await t.test("selects services by explicit native prefixes and rejects unknown or ambiguous routes", async () => {
+		const services = [
+			{ id: "gmail", pathPrefix: "/gmail/v1/users/me/", origin: "https://gmail.googleapis.com", scopes: ["gmail-scope"] },
+			{ id: "calendar", pathPrefix: "/calendar/v3/", origin: "https://www.googleapis.com", scopes: ["calendar-scope"] },
+		];
+
+		assert.deepEqual(await run({ action: "service", services, path: "/gmail/v1/users/me/profile" }), services[0]);
+		assert.deepEqual(await run({ action: "service", services, path: "/calendar/v3/calendars/primary/events" }), services[1]);
+
+		for (const path of ["/drive/v3/files", "/calendar/v30/calendars", "/gmail/v1/users/me-too/profile"]) {
+			assert.match((await run({ action: "service", services, path })).error, /does not match an enabled service/);
+		}
+
+		const overlapping = [...services, { id: "other", pathPrefix: "/calendar/" }];
+		assert.match((await run({ action: "service", services: overlapping, path: "/calendar/v3/colors" })).error, /matches multiple enabled services/);
 	});
 	await t.test("parses Retry-After seconds and HTTP dates, rejecting malformed values", async () => {
 		assert.deepEqual(await run({ action: "retry-after", values: [null, "", "5", "0", "-1", "Infinity", "garbage", "Thu, 01 Jan 1970 00:00:05 GMT"] }), [null, null, 5000, 0, null, null, null, 5000]);
@@ -3828,8 +3852,8 @@ test("applies shared reliability to real MCP connector calls without replaying C
 		return Response.json({ ok: true });
 	};
 
-	const read = "google.request({ service: 'gmail', method: 'GET', path: '/gmail/v1/users/me/profile' })";
-	const write = "google.request({ service: 'gmail', method: 'POST', path: '/gmail/v1/users/me/messages/send', body: { raw: 'test' } })";
+	const read = "google.request({ method: 'GET', path: '/gmail/v1/users/me/profile' })";
+	const write = "google.request({ method: 'POST', path: '/gmail/v1/users/me/messages/send', body: { raw: 'test' } })";
 	const invoke = (client, code) => client.callTool({ name: "code", arguments: { code } });
 
 	try {
@@ -3847,7 +3871,7 @@ test("applies shared reliability to real MCP connector calls without replaying C
 			await t.test("returns method/path context to the MCP caller without adding it to operational logs", async () => {
 				mode = "google-permission"; googleCalls = 0;
 				debugServer.clearLogs();
-				const failed = await invoke(client, "async () => await google.request({ service: 'gmail', method: 'GET', path: '/gmail/v1/users/me/messages/private-path-marker', query: { q: 'private-query-marker' } })");
+				const failed = await invoke(client, "async () => await google.request({ method: 'GET', path: '/gmail/v1/users/me/messages/private-path-marker', query: { q: 'private-query-marker' } })");
 				assert.equal(failed.isError, true);
 				assert.equal(googleCalls, 1);
 				assert.match(failed.content[0].text, /GET \/gmail\/v1\/users\/me\/messages\/private-path-marker: Google gmail: API returned HTTP 403/);
@@ -3857,7 +3881,7 @@ test("applies shared reliability to real MCP connector calls without replaying C
 				assert.doesNotMatch(JSON.stringify(debugServer.getLogs()), /private-path-marker|private-query-marker/);
 			});
 			await t.test("distinguishes Gmail 403 rate limits from permissions without replaying writes", async () => {
-				const profile = "google.request({ service: 'gmail', method: 'GET', path: '/gmail/v1/users/me/profile' })";
+				const profile = "google.request({ method: 'GET', path: '/gmail/v1/users/me/profile' })";
 				mode = "google-rate"; googleCalls = 0;
 				assert.deepEqual((await invoke(client, `async () => await ${profile}`)).structuredContent, { result: { emailAddress: "joe@j1.io" } });
 				assert.equal(googleCalls, 2);
@@ -3868,12 +3892,12 @@ test("applies shared reliability to real MCP connector calls without replaying C
 				assert.match(permission.content[0].text, /permission/);
 				assert.doesNotMatch(permission.content[0].text, /private forbidden/);
 				mode = "google-rate-write"; googleCalls = 0;
-				const limitedWrite = await invoke(client, "async () => await google.request({ service: 'gmail', method: 'POST', path: '/gmail/v1/users/me/messages/send', body: { raw: 'test' } })");
+				const limitedWrite = await invoke(client, "async () => await google.request({ method: 'POST', path: '/gmail/v1/users/me/messages/send', body: { raw: 'test' } })");
 				assert.equal(limitedWrite.isError, true);
 				assert.equal(googleCalls, 1);
 				assert.match(limitedWrite.content[0].text, /rate_limited.*safe_to_replay=false/);
 				mode = "google-invalid"; googleCalls = 0;
-				const malformedWrite = await invoke(client, "async () => await google.request({ service: 'gmail', method: 'POST', path: '/gmail/v1/users/me/messages/send', body: { raw: 'test' } })");
+				const malformedWrite = await invoke(client, "async () => await google.request({ method: 'POST', path: '/gmail/v1/users/me/messages/send', body: { raw: 'test' } })");
 				assert.equal(malformedWrite.isError, true);
 				assert.equal(googleCalls, 1);
 				assert.match(malformedWrite.content[0].text, /invalid_response.*outcome=succeeded/);
@@ -3886,7 +3910,7 @@ test("applies shared reliability to real MCP connector calls without replaying C
 				assert.match(invalid.content[0].text, /invalid_response/);
 			});
 			await t.test("does not multiply authentication retries at the outer API layer", async () => {
-				const profile = "google.request({ service: 'gmail', method: 'GET', path: '/gmail/v1/users/me/profile' })";
+				const profile = "google.request({ method: 'GET', path: '/gmail/v1/users/me/profile' })";
 				mode = "google-auth-invalidate";
 				await invoke(client, `async () => await ${profile}`);
 				mode = "google-auth-failure"; authCalls = 0; googleCalls = 0;

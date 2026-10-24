@@ -3,7 +3,7 @@ import { apiRequestSchema, apiQueryValueSchema, type QueryValue } from "../src/c
 import { defineConnectorTool, type ConciergeTool } from "../src/connector-tools";
 import type { ConnectorId } from "../src/connectors";
 import type { ConnectorRequests, RequestAuthentication, ApiPayload } from "../src/connector-requests";
-import type { ConnectorHttp } from "../src/connector-http";
+import { selectApiService, type ConnectorHttp } from "../src/connector-http";
 import type { JsonValue } from "../src/json";
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
@@ -58,6 +58,13 @@ const limitedRequest = apiRequestSchema({ methods: ["GET", "POST"], pathPrefix: 
 export type MethodLiteralsArePreserved = Assert<Equal<z.infer<typeof limitedRequest>["method"], "GET" | "POST">>;
 
 export type QueryValuesFollowTheSchema = Assert<Equal<QueryValue, z.infer<typeof apiQueryValueSchema>>>;
+
+const routedService = selectApiService("/gmail/", [
+	{ id: "gmail", pathPrefix: "/gmail/", scopes: ["mail"] },
+	{ id: "calendar", pathPrefix: "/calendar/", scopes: ["calendar"] },
+] as const);
+
+export type RoutedServiceIdsAreLiteral = Assert<Equal<typeof routedService.id, "gmail" | "calendar">>;
 
 // @ts-expect-error Unsupported HTTP methods must fail at the authoring boundary.
 apiRequestSchema({ methods: ["TRACE"], pathPrefix: "/" });

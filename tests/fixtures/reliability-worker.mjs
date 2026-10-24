@@ -8,7 +8,7 @@ import { z } from "zod";
 import { apiRequestSchema, toToolInputSchema } from "../../src/connector-inputs.ts";
 import { defineConnectorTool } from "../../src/connector-tools.ts";
 import { CONNECTOR_DEFINITIONS } from "../../src/connectors.ts";
-import { ConnectorHttp, encodeFormBody } from "../../src/connector-http.ts";
+import { ConnectorHttp, encodeFormBody, selectApiService } from "../../src/connector-http.ts";
 import { ConnectorImages } from "../../src/connector-images.ts";
 import { GoogleWorkspaceAuth } from "../../src/integrations/google/auth.ts";
 import { UsageLog } from "../../src/usage-logging.ts";
@@ -98,13 +98,12 @@ export default {
 			});
 
 			if (options.action === "inputs") {
-				const base = apiRequestSchema(options.contract);
-
-				const schema = options.contract.extraKeys?.includes("service")
-					? base.safeExtend({ service: z.enum(["gmail"]) }) : base;
+				const schema = apiRequestSchema(options.contract);
 
 				return Response.json({ result: schema.parse(options.args), inputSchema: toToolInputSchema(schema) });
 			}
+
+			if (options.action === "service") return Response.json(selectApiService(options.path, options.services));
 
 			if (options.action === "retry-after")
 				return Response.json(options.values.map((value) => parseRetryAfter(value, 0) ?? null));

@@ -40,6 +40,8 @@ test("Vite preserves the production configuration without enabling local debug",
 test("the Vite bundle runs MCP through the existing Durable Object and Worker Loader", async () => {
 	const output = JSON.parse(readFileSync(new URL("../dist/concierge/wrangler.json", import.meta.url), "utf8"));
 	const kalshiKeys = generateKeyPairSync("ed25519");
+	const googleKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+	const googleScopes = new Set();
 
 	const harness = createTestHarness({
 		root: fileURLToPath(new URL("..", import.meta.url)),
@@ -56,6 +58,10 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 					TWILIO_WEBHOOK_KEY_ID: `webhooks_sharedkey_${"a".repeat(26)}`,
 					KALSHI_API_KEY_ID: "build-kalshi-key-id",
 					KALSHI_PRIVATE_KEY: kalshiKeys.privateKey.export({ format: "pem", type: "pkcs8" }),
+					GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({
+						type: "service_account", client_email: "concierge@j1-concierge.iam.gserviceaccount.com", private_key_id: "build-google-key-id",
+						private_key: googleKeys.privateKey.export({ format: "pem", type: "pkcs8" }),
+					}),
 				},
 			},
 			{
@@ -72,6 +78,48 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 	globalThis.fetch = async (input, init) => {
 		const request = new Request(input, init);
 		const url = new URL(request.url);
+
+		if (url.hostname === "oauth2.googleapis.com") {
+			const form = new URLSearchParams(await request.text());
+			const [header, payload, signature] = form.get("assertion").split(".");
+			assert.ok(verify("RSA-SHA256", Buffer.from(`${header}.${payload}`), googleKeys.publicKey, Buffer.from(signature, "base64url")));
+			const claims = JSON.parse(Buffer.from(payload, "base64url"));
+			assert.equal(claims.sub, "joe@j1.io");
+			googleScopes.add(claims.scope);
+
+			return Response.json({ access_token: claims.scope === "https://www.googleapis.com/auth/calendar" ? "build-calendar-token" : "build-gmail-token", expires_in: 3600 });
+		}
+
+		if (url.hostname === "gmail.googleapis.com") {
+			assert.equal(url.pathname, "/gmail/v1/users/me/profile");
+			assert.equal(request.headers.get("Authorization"), "Bearer build-gmail-token");
+
+			return Response.json({ emailAddress: "joe@j1.io" });
+		}
+
+		if (url.hostname === "www.googleapis.com") {
+			assert.equal(url.pathname, "/calendar/v3/users/me/calendarList");
+			assert.equal(request.headers.get("Authorization"), "Bearer build-calendar-token");
+
+			return Response.json({ items: [{ primary: true }] });
+		}
+
+		if (url.hostname === "places.googleapis.com" || url.hostname === "routes.googleapis.com") {
+			assert.equal(request.headers.get("X-Goog-Api-Key"), "unused-build-test-secret");
+			assert.equal(request.headers.has("Authorization"), false);
+
+			if (url.hostname === "places.googleapis.com") {
+				assert.equal(url.pathname, "/v1/places/build-place");
+				assert.equal(request.method, "GET");
+
+				return Response.json({ id: "build-place" });
+			}
+
+			assert.equal(url.pathname, "/directions/v2:computeRoutes");
+			assert.equal(request.method, "POST");
+
+			return Response.json({ routes: [] });
+		}
 
 		if (url.hostname === "external-api.kalshi.com") {
 			assert.equal(request.headers.get("KALSHI-ACCESS-KEY"), "build-kalshi-key-id");
@@ -171,6 +219,19 @@ test("the Vite bundle runs MCP through the existing Durable Object and Worker Lo
 		assert.equal(result.isError, undefined);
 		assert.equal(result.structuredContent.result.sum, 4);
 		assert.deepEqual(result.structuredContent.result.matches.results.map((match) => match.path).sort(), ["cloudflare.read_webpage_as_markdown", "exa.request", "fantasypros.request", "google.request", "kalshi.request", "maps.request", "twilio.request", "unifi.request"]);
+
+		const routed = await client.callTool({ name: "code", arguments: {
+			code: `async () => await Promise.all([
+				google.request({ method: 'GET', path: '/gmail/v1/users/me/profile' }),
+				google.request({ method: 'GET', path: '/calendar/v3/users/me/calendarList' }),
+				maps.request({ method: 'GET', path: '/v1/places/build-place', query: { fields: 'id' } }),
+				maps.request({ method: 'POST', path: '/directions/v2:computeRoutes', query: { fields: 'routes.distanceMeters' }, body: {} })
+			])`,
+		} });
+
+		assert.equal(routed.isError, undefined, JSON.stringify(routed));
+		assert.deepEqual(routed.structuredContent.result, [{ emailAddress: "joe@j1.io" }, { items: [{ primary: true }] }, { id: "build-place" }, { routes: [] }]);
+		assert.deepEqual([...googleScopes].sort(), ["https://mail.google.com/ https://www.googleapis.com/auth/gmail.settings.basic https://www.googleapis.com/auth/gmail.settings.sharing", "https://www.googleapis.com/auth/calendar"].sort());
 
 		const page = await client.callTool({ name: "code", arguments: {
 			code: "async () => await cloudflare.read_webpage_as_markdown({ url: 'https://example.com/test' })",

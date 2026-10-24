@@ -12,6 +12,23 @@ type ApiRequest<Body> = {
 
 type EncodedBody = { body: BodyInit | undefined; contentType: string };
 
+type ApiService = { pathPrefix: string; paths?: ReadonlySet<string> };
+
+export function selectApiService<Service extends ApiService>(path: string, services: readonly Service[]): Service {
+	let selected: Service | undefined;
+
+	for (const service of services) {
+		if (!(service.paths ? service.paths.has(path) : path.startsWith(service.pathPrefix))) continue;
+
+		if (selected) throw new Error("API path matches multiple enabled services.");
+		selected = service;
+	}
+
+	if (!selected) throw new Error("API path does not match an enabled service.");
+
+	return selected;
+}
+
 type ApiPolicy<Body> = {
 	origin: string;
 	pathPrefix: string;
